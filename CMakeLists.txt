@@ -33,7 +33,7 @@ set(DMOD_BUILD_TEMPLATES OFF CACHE BOOL "Build templates")
 
 FetchContent_MakeAvailable(dmod)
 
-project(dmdfs
+project(dmdevfs
     VERSION ${DMOD_MODULE_VERSION}
     DESCRIPTION "DMOD Driver File System"
     LANGUAGES C CXX)
@@ -57,10 +57,10 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(dmfsi)
 
 # ======================================================================
-#               DMDFS Module Configuration
+#               DMDEVFS Module Configuration
 # ======================================================================
 # Name of the module 
-set(DMOD_MODULE_NAME        dmdfs)
+set(DMOD_MODULE_NAME        dmdevfs)
 
 # Version is already set above and used in project()
 # No need to set it again here
@@ -79,7 +79,7 @@ set(DMOD_STACK_SIZE         1024)
 #
 dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     # List of source files - can include C and C++ files
-    src/dmdfs.c
+    src/dmdevfs.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE

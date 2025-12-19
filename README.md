@@ -1,10 +1,10 @@
-# dmdfs
+# dmdevfs
 
 DMOD Driver File System - A driver-based file system module for embedded systems.
 
 ## Overview
 
-`dmdfs` (DMOD Driver File System) is a file system implementation that provides an interface to access files through hardware drivers or external storage. It is built on the **DMOD (Dynamic Modules)** framework and implements the **DMFSI (DMOD File System Interface)**, making it compatible with **DMVFS (DMOD Virtual File System)** and other DMOD-based applications.
+`dmdevfs` (DMOD Driver File System) is a file system implementation that provides an interface to access files through hardware drivers or external storage. It is built on the **DMOD (Dynamic Modules)** framework and implements the **DMFSI (DMOD File System Interface)**, making it compatible with **DMVFS (DMOD Virtual File System)** and other DMOD-based applications.
 
 ### Key Features
 
@@ -15,7 +15,7 @@ DMOD Driver File System - A driver-based file system module for embedded systems
 
 ## Architecture
 
-DMDFS is part of a modular embedded file system architecture built on DMOD:
+DMDEVFS is part of a modular embedded file system architecture built on DMOD:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -43,7 +43,7 @@ DMDFS is part of a modular embedded file system architecture built on DMOD:
          ┌─────────────────┼─────────────────┐
          ▼                 ▼                 ▼
 ┌────────────────┐  ┌─────────────┐  ┌─────────────┐
-│ DMDFS (Driver) │  │ DMFFS (Flash│  │ DMRAMFS (RAM│
+│ DMDEVFS (Driver│  │ DMFFS (Flash│  │ DMRAMFS (RAM│
 │ Driver-based   │  │ Read-only   │  │ Temporary   │
 │ (This Project) │  │             │  │             │
 └────────────────┘  └─────────────┘  └─────────────┘
@@ -57,9 +57,9 @@ DMDFS is part of a modular embedded file system architecture built on DMOD:
 ### Component Relationships
 
 - **[DMOD](https://github.com/choco-technologies/dmod)**: The foundation providing dynamic module loading, inter-module communication, and resource management
-- **[DMFSI](https://github.com/choco-technologies/dmfsi)**: Defines the standard file system interface that DMDFS implements
-- **[DMVFS](https://github.com/choco-technologies/dmvfs)**: Virtual file system layer that can mount DMDFS at any path in a unified directory tree
-- **DMDFS**: This project - implements DMFSI to provide access to driver-based storage
+- **[DMFSI](https://github.com/choco-technologies/dmfsi)**: Defines the standard file system interface that DMDEVFS implements
+- **[DMVFS](https://github.com/choco-technologies/dmvfs)**: Virtual file system layer that can mount DMDEVFS at any path in a unified directory tree
+- **DMDEVFS**: This project - implements DMFSI to provide access to driver-based storage
 
 ## Building
 
@@ -81,7 +81,7 @@ The module can be loaded and mounted using DMVFS:
 dmvfs_init(16, 32);
 
 // Mount the driver filesystem at /mnt
-dmvfs_mount_fs("dmdfs", "/mnt", NULL);
+dmvfs_mount_fs("dmdevfs", "/mnt", NULL);
 
 // Use standard file operations
 void* fp;
@@ -127,11 +127,11 @@ The module implements the full DMFSI interface:
 ## Project Structure
 
 ```
-dmdfs/
+dmdevfs/
 ├── include/
-│   └── dmdfs.h              # Public header
+│   └── dmdevfs.h            # Public header
 ├── src/
-│   └── dmdfs.c              # Main DMDFS implementation
+│   └── dmdevfs.c            # Main DMDEVFS implementation
 ├── CMakeLists.txt           # CMake build configuration
 ├── manifest.dmm             # DMOD manifest file
 ├── README.md                # This file
@@ -149,9 +149,9 @@ dmdfs/
 ```cmake
 include(FetchContent)
 
-# Fetch DMDFS
+# Fetch DMDEVFS
 FetchContent_Declare(
-    dmdfs
+    dmdevfs
     GIT_REPOSITORY https://github.com/choco-technologies/dmdfs.git
     GIT_TAG        main
 )
@@ -159,17 +159,17 @@ FetchContent_Declare(
 # Set DMOD mode
 set(DMOD_MODE "DMOD_MODULE" CACHE STRING "DMOD build mode")
 
-FetchContent_MakeAvailable(dmdfs)
+FetchContent_MakeAvailable(dmdevfs)
 
 # Link to your target
-target_link_libraries(your_target PRIVATE dmdfs)
+target_link_libraries(your_target PRIVATE dmdevfs)
 ```
 
 ### Manual Integration
 
 1. Clone the repository: `git clone https://github.com/choco-technologies/dmdfs.git`
-2. Add as subdirectory: `add_subdirectory(dmdfs)`
-3. Link library: `target_link_libraries(your_target dmdfs)`
+2. Add as subdirectory: `add_subdirectory(dmdevfs)`
+3. Link library: `target_link_libraries(your_target dmdevfs)`
 
 ## Contributing
 

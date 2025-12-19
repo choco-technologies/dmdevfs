@@ -19,7 +19,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Build dmdfs project
+      - name: Build dmdevfs project
         run: |
           mkdir -p build
           cd build

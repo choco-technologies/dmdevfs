@@ -64,7 +64,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Extracted version: $VERSION"
       
-      - name: Build dmdfs for ${{ matrix.arch_name }}
+      - name: Build dmdevfs for ${{ matrix.arch_name }}
         run: |
           set -e
           ARCH_DIR_NAME=$(echo "${{ matrix.arch_name }}" | sed 's|/|-|')
@@ -91,12 +91,12 @@ jobs:
           DMF_DIR="$BUILD_DIR/dmf"
           DMFC_DIR="$BUILD_DIR/dmfc"
           
-          cp $DMF_DIR/dmdfs.dmf release_package/
-          cp $DMF_DIR/dmdfs_version.txt release_package/
-          cp $DMFC_DIR/dmdfs.dmfc release_package/
+          cp $DMF_DIR/dmdevfs.dmf release_package/
+          cp $DMF_DIR/dmdevfs_version.txt release_package/
+          cp $DMFC_DIR/dmdevfs.dmfc release_package/
           # Copy .dmd file if it exists
-          if [ -f $DMF_DIR/dmdfs.dmd ]; then
-            cp $DMF_DIR/dmdfs.dmd release_package/
+          if [ -f $DMF_DIR/dmdevfs.dmd ]; then
+            cp $DMF_DIR/dmdevfs.dmd release_package/
           fi
                     
           # Copy documentation and license
@@ -112,16 +112,16 @@ jobs:
       - name: Create release archive
         run: |
           cd release_package
-          zip -r ../dmdfs-${{ github.event.release.tag_name }}-$ARCH_DIR_NAME.zip .
+          zip -r ../dmdevfs-${{ github.event.release.tag_name }}-$ARCH_DIR_NAME.zip .
           cd ..
           echo "Created archive:"
-          ls -lh dmdfs-*.zip
+          ls -lh dmdevfs-*.zip
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: dmdfs-${{ github.event.release.tag_name }}-*.zip
+          path: dmdevfs-${{ github.event.release.tag_name }}-*.zip
           retention-days: 1
 
   generate-versions-manifest:
@@ -140,7 +140,7 @@ jobs:
       - name: Generate versions.dmm
         run: |
           set -e
-          echo "# List of available versions for dmdfs modules" > versions.dmm
+          echo "# List of available versions for dmdevfs modules" > versions.dmm
           echo "# Generated automatically by CI" >> versions.dmm
           echo "" >> versions.dmm
           
@@ -158,8 +158,8 @@ jobs:
           
           echo "Found versions: $VERSIONS"
           
-          # Add $version-available directive for dmdfs module
-          echo "\$version-available dmdfs $VERSIONS" >> versions.dmm
+          # Add $version-available directive for dmdevfs module
+          echo "\$version-available dmdevfs $VERSIONS" >> versions.dmm
           
           echo "Generated versions.dmm:"
           cat versions.dmm
