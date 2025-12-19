@@ -1,0 +1,5 @@
+# Include dynamically generated versions list from latest release
+$include https://github.com/choco-technologies/dmdfs/releases/download/vlatest/versions.dmm
+
+# Module entries with version placeholder - will be expanded by $version-available
+dmdfs https://github.com/choco-technologies/dmdfs/releases/download/v<version>/dmdfs-v<version>-<arch_name>.zip
