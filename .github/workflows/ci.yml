@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, develop ]
+  pull_request:
+    branches: [ master, develop, feature/**, copilot/** ]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    container:
+      image: chocotechnologies/dmod:1.0.4
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Build dmdfs project
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DDMOD_MODE=DMOD_MODULE
+          cmake --build .
+      
+      - name: Verify build artifacts
+        run: |
+          echo "Build completed successfully"
+          ls -lh build/dmf/
