@@ -3,6 +3,10 @@
 # =====================================================================
 cmake_minimum_required(VERSION 3.18)
 
+# ======================================================================
+#               For VS Code
+# ======================================================================
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ======================================================================
 #               DMOD DFS
@@ -46,17 +50,6 @@ include(${DMOD_DIR}/paths.cmake)
 dmod_setup_external_module()
 
 # ======================================================================
-#               Fetch DMOD File System Interface
-# ======================================================================
-FetchContent_Declare(
-    dmfsi
-    GIT_REPOSITORY
-    https://github.com/choco-technologies/dmfsi.git
-    GIT_TAG        master
-)
-FetchContent_MakeAvailable(dmfsi)
-
-# ======================================================================
 #               DMDEVFS Module Configuration
 # ======================================================================
 # Name of the module 
@@ -82,9 +75,11 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmdevfs.c
 )
 
+# Link to other DMOD modules (will be downloaded on build time)
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmfsi
+)
+
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-
-# Link to DMFSI interface
-target_link_libraries(${DMOD_MODULE_NAME} dmfsi_if)
