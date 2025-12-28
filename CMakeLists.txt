@@ -15,6 +15,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(NOT DEFINED DMOD_MODULE_VERSION)
     set(DMOD_MODULE_VERSION "0.1" CACHE STRING "DMOD module version")
 endif()
+set(DMOD_MODE "DMOD_MODULE" CACHE STRING "DMOD build mode")
 
 # ======================================================================
 #               Fetch DMOD repository
@@ -78,6 +79,9 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
 # Link to other DMOD modules (will be downloaded on build time)
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
+    dmdrvi
+    dmini
+    dmlist
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
