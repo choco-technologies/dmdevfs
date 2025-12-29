@@ -364,7 +364,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
     }
     
     // Only support opening root directory
-    if (path == NULL || strlen(path) == 0 || strcmp(path, "/") == 0)
+    if (path == NULL || *path == '\0' || strcmp(path, "/") == 0)
     {
         dir_handle_t* dir = Dmod_Malloc(sizeof(dir_handle_t));
         if (dir == NULL)
@@ -468,7 +468,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _direxists, (dmfsi_context_t 
     }
     
     // Only root directory exists
-    if (path == NULL || strlen(path) == 0 || strcmp(path, "/") == 0)
+    if (path == NULL || *path == '\0' || strcmp(path, "/") == 0)
     {
         return 1;
     }
@@ -775,6 +775,11 @@ static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool
 
 /**
  * @brief Build device filename based on dev_num flags
+ * 
+ * Note: For DMDRVI_NUM_MINOR, this returns a path with forward slash (e.g., "dmspi0/0").
+ * This matches the dmdrvi interface specification. Full directory hierarchy support
+ * would require implementing nested directory operations, which is left for future
+ * enhancement when file I/O operations are implemented.
  */
 static void build_device_filename(const driver_node_t* driver_node, char* filename, size_t size)
 {
@@ -786,7 +791,8 @@ static void build_device_filename(const driver_node_t* driver_node, char* filena
     else if (driver_node->dev_num.flags & DMDRVI_NUM_MINOR)
     {
         // Device file: /dev/dmspi0/0 -> dmspi0/0
-        // This creates a directory structure with major and minor
+        // This represents a directory structure with major and minor numbers
+        // TODO: Implement proper nested directory support in opendir/readdir
         snprintf(filename, size, "%s%d/%d", 
                  driver_node->driver_name, 
                  driver_node->dev_num.major, 
