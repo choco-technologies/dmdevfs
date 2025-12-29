@@ -17,6 +17,7 @@
 #include "dmdrvi.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 /** 
  * @brief Magic number for DMDEVFS context validation
@@ -363,8 +364,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
         return DMFSI_ERR_INVALID;
     }
     
-    // Only support opening root directory
-    if (path == NULL || *path == '\0' || strcmp(path, "/") == 0)
+    // Only support opening root directory (NULL or empty path means root, or explicit "/")
+    bool is_root = (path == NULL) || 
+                   (path[0] == '\0') || 
+                   (strcmp(path, "/") == 0);
+    
+    if (is_root)
     {
         dir_handle_t* dir = Dmod_Malloc(sizeof(dir_handle_t));
         if (dir == NULL)
@@ -467,8 +472,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _direxists, (dmfsi_context_t 
         return 0;
     }
     
-    // Only root directory exists
-    if (path == NULL || *path == '\0' || strcmp(path, "/") == 0)
+    // Only root directory exists (NULL or empty path means root, or explicit "/")
+    bool is_root = (path == NULL) || 
+                   (path[0] == '\0') || 
+                   (strcmp(path, "/") == 0);
+    
+    if (is_root)
     {
         return 1;
     }
