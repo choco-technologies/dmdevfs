@@ -51,8 +51,8 @@ typedef struct
 struct dmfsi_context
 {
     uint32_t    magic;
-    const char* config_path;     // Path with the configuration files
-    dmlist_context_t* drivers;      // List of loaded drivers
+    char* config_path;          // Path with the configuration files
+    dmlist_context_t* drivers;  // List of loaded drivers
 };
 
 
@@ -75,6 +75,7 @@ static int compare_driver(const void* data, const void* user_data );
 static bool is_directory( dmfsi_context_t ctx, const char* path );
 static driver_node_t* get_next_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* dir_path );
 
+static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path );
 static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t* stat );
 
 // ============================================================================
@@ -498,8 +499,24 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _stat, (dmfsi_context_t ctx, 
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement stat
-    return DMFSI_ERR_GENERAL;
+    driver_node_t* driver_node = find_driver_node(ctx, path);
+    if (driver_node == NULL)
+    {
+        DMOD_LOG_ERROR("File not found in stat: %s\n", path);
+        return DMFSI_ERR_NOT_FOUND;
+    }
+
+    dmdrvi_stat_t driver_stat_buf;
+    int res = driver_stat(driver_node, path, &driver_stat_buf);
+    if (res != 0)
+    {
+        DMOD_LOG_ERROR("Failed to get file stats for: %s\n", path);
+        return DMFSI_ERR_GENERAL;
+    }
+
+    stat->size = driver_stat_buf.size;
+    stat->attr = driver_stat_buf.mode;
+    return DMFSI_OK;
 }
 
 /**
@@ -863,7 +880,7 @@ static int read_driver_node_path( const driver_node_t* node, char* path_buffer, 
  */
 static int compare_driver_directory( const void* data, const void* user_data )
 {
-    const directory_node_t* node = (const directory_node_t*)data;
+    const driver_node_t* node = (const driver_node_t*)data;
     const char* path = (const char*)user_data;
     if (node == NULL || path == NULL)
     {
@@ -871,7 +888,7 @@ static int compare_driver_directory( const void* data, const void* user_data )
     }
 
     char directory_path[MAX_PATH_LENGTH] = {0};
-    if(read_driver_parent_directory(node, path, sizeof(directory_path)) != 0)
+    if(read_driver_parent_directory(node, directory_path, sizeof(directory_path)) != 0)
     {
         return -1;
     }
@@ -933,6 +950,14 @@ static bool is_directory( dmfsi_context_t ctx, const char* path )
 static driver_node_t* get_next_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* path )
 {
     return dmlist_find_next(ctx->drivers, current, path, compare_driver_directory);
+}
+
+/**
+ * @brief Find a driver node by its path
+ */
+static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path )
+{
+    return dmlist_find(ctx->drivers, path, compare_driver_node_path);
 }
 
 /**
