@@ -46,6 +46,18 @@ typedef struct
 } directory_node_t;
 
 /**
+ * @brief File handle structure for file operations
+ */
+typedef struct
+{
+    driver_node_t* driver;      // Driver associated with this file
+    dmdrvi_file_t driver_file;  // Driver file handle
+    const char* path;           // File path
+    int mode;                   // File open mode
+    int attr;                   // File attributes
+} file_handle_t;
+
+/**
  * @brief File system context structure
  */
 struct dmfsi_context
@@ -191,9 +203,52 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement file opening through driver
-    DMOD_LOG_ERROR("fopen not yet implemented\n");
-    return DMFSI_ERR_GENERAL;
+    if(fp == NULL || path == NULL)
+    {
+        DMOD_LOG_ERROR("NULL pointer in fopen\n");
+        return DMFSI_ERR_INVALID;
+    }
+    
+    // Find the driver node for this file
+    driver_node_t* driver_node = find_driver_node(ctx, path);
+    if(driver_node == NULL)
+    {
+        DMOD_LOG_ERROR("File not found: %s\n", path);
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    // Get the dmdrvi_open function
+    dmod_dmdrvi_open_t dmdrvi_open = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_open_sig);
+    if(dmdrvi_open == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_open\n");
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    // Create file handle
+    file_handle_t* handle = Dmod_Malloc(sizeof(file_handle_t));
+    if(handle == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for file handle\n");
+        return DMFSI_ERR_GENERAL;
+    }
+    
+    // Open the file through the driver
+    int result = dmdrvi_open(driver_node->driver_context, &handle->driver_file, path, mode, attr);
+    if(result != 0)
+    {
+        DMOD_LOG_ERROR("Driver failed to open file: %s\n", path);
+        Dmod_Free(handle);
+        return DMFSI_ERR_GENERAL;
+    }
+    
+    handle->driver = driver_node;
+    handle->path = path;
+    handle->mode = mode;
+    handle->attr = attr;
+    
+    *fp = handle;
+    return DMFSI_OK;
 }
 
 /**
@@ -207,9 +262,23 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fclose, (dmfsi_context_t ctx
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement file closing
-    DMOD_LOG_ERROR("fclose not yet implemented\n");
-    return DMFSI_ERR_GENERAL;
+    if(fp == NULL)
+    {
+        DMOD_LOG_ERROR("NULL file pointer in fclose\n");
+        return DMFSI_ERR_INVALID;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_close function
+    dmod_dmdrvi_close_t dmdrvi_close = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_close_sig);
+    if(dmdrvi_close != NULL)
+    {
+        dmdrvi_close(handle->driver->driver_context, handle->driver_file);
+    }
+    
+    Dmod_Free(handle);
+    return DMFSI_OK;
 }
 
 /**
@@ -220,12 +289,35 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
         DMOD_LOG_ERROR("Invalid context in fread\n");
+        if(read) *read = 0;
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement file reading
-    if (read) *read = 0;
-    return DMFSI_ERR_GENERAL;
+    if(fp == NULL || buffer == NULL)
+    {
+        if(read) *read = 0;
+        return DMFSI_ERR_INVALID;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_read function
+    dmod_dmdrvi_read_t dmdrvi_read = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_read_sig);
+    if(dmdrvi_read == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_read\n");
+        if(read) *read = 0;
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    int result = dmdrvi_read(handle->driver->driver_context, handle->driver_file, buffer, size, read);
+    if(result != 0)
+    {
+        if(read) *read = 0;
+        return DMFSI_ERR_GENERAL;
+    }
+    
+    return DMFSI_OK;
 }
 
 /**
@@ -236,12 +328,35 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
         DMOD_LOG_ERROR("Invalid context in fwrite\n");
+        if(written) *written = 0;
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement file writing
-    if (written) *written = 0;
-    return DMFSI_ERR_GENERAL;
+    if(fp == NULL || buffer == NULL)
+    {
+        if(written) *written = 0;
+        return DMFSI_ERR_INVALID;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_write function
+    dmod_dmdrvi_write_t dmdrvi_write = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_write_sig);
+    if(dmdrvi_write == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_write\n");
+        if(written) *written = 0;
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    int result = dmdrvi_write(handle->driver->driver_context, handle->driver_file, buffer, size, written);
+    if(result != 0)
+    {
+        if(written) *written = 0;
+        return DMFSI_ERR_GENERAL;
+    }
+    
+    return DMFSI_OK;
 }
 
 /**
@@ -255,8 +370,23 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _lseek, (dmfsi_context_t ctx,
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement file seeking
-    return DMFSI_ERR_GENERAL;
+    if(fp == NULL)
+    {
+        return DMFSI_ERR_INVALID;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_lseek function
+    dmod_dmdrvi_lseek_t dmdrvi_lseek = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_lseek_sig);
+    if(dmdrvi_lseek == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_lseek\n");
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    int result = dmdrvi_lseek(handle->driver->driver_context, handle->driver_file, offset, whence);
+    return result;
 }
 
 /**
@@ -270,8 +400,22 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx,
         return -1;
     }
     
-    // TODO: Implement position retrieval
-    return -1;
+    if(fp == NULL)
+    {
+        return -1;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_tell function
+    dmod_dmdrvi_tell_t dmdrvi_tell = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_tell_sig);
+    if(dmdrvi_tell == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_tell\n");
+        return -1;
+    }
+    
+    return dmdrvi_tell(handle->driver->driver_context, handle->driver_file);
 }
 
 /**
@@ -285,8 +429,22 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, v
         return 1;
     }
     
-    // TODO: Implement EOF checking
-    return 1;
+    if(fp == NULL)
+    {
+        return 1;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_eof function
+    dmod_dmdrvi_eof_t dmdrvi_eof = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_eof_sig);
+    if(dmdrvi_eof == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_eof\n");
+        return 1;
+    }
+    
+    return dmdrvi_eof(handle->driver->driver_context, handle->driver_file);
 }
 
 /**
@@ -300,8 +458,22 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _size, (dmfsi_context_t ctx,
         return -1;
     }
     
-    // TODO: Implement size retrieval
-    return -1;
+    if(fp == NULL)
+    {
+        return -1;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_size function
+    dmod_dmdrvi_size_t dmdrvi_size = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_size_sig);
+    if(dmdrvi_size == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_size\n");
+        return -1;
+    }
+    
+    return dmdrvi_size(handle->driver->driver_context, handle->driver_file);
 }
 
 /**
@@ -315,8 +487,21 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _getc, (dmfsi_context_t ctx, 
         return -1;
     }
     
-    // TODO: Implement character reading
-    return -1;
+    if(fp == NULL)
+    {
+        return -1;
+    }
+    
+    unsigned char ch;
+    size_t bytes_read = 0;
+    
+    int result = dmfsi_dmdevfs_fread(ctx, fp, &ch, 1, &bytes_read);
+    if(result != DMFSI_OK || bytes_read != 1)
+    {
+        return -1;
+    }
+    
+    return (int)ch;
 }
 
 /**
@@ -330,8 +515,21 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _putc, (dmfsi_context_t ctx, 
         return -1;
     }
     
-    // TODO: Implement character writing
-    return DMFSI_ERR_GENERAL;
+    if(fp == NULL)
+    {
+        return -1;
+    }
+    
+    unsigned char ch = (unsigned char)c;
+    size_t bytes_written = 0;
+    
+    int result = dmfsi_dmdevfs_fwrite(ctx, fp, &ch, 1, &bytes_written);
+    if(result != DMFSI_OK || bytes_written != 1)
+    {
+        return -1;
+    }
+    
+    return (int)ch;
 }
 
 /**
@@ -345,7 +543,27 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fflush, (dmfsi_context_t ctx
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement buffer flushing
+    if(fp == NULL)
+    {
+        return DMFSI_ERR_INVALID;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_flush function
+    dmod_dmdrvi_flush_t dmdrvi_flush = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_flush_sig);
+    if(dmdrvi_flush == NULL)
+    {
+        // Flush not supported by driver, return OK
+        return DMFSI_OK;
+    }
+    
+    int result = dmdrvi_flush(handle->driver->driver_context, handle->driver_file);
+    if(result != 0)
+    {
+        return DMFSI_ERR_GENERAL;
+    }
+    
     return DMFSI_OK;
 }
 
@@ -360,7 +578,27 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _sync, (dmfsi_context_t ctx, 
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement sync
+    if(fp == NULL)
+    {
+        return DMFSI_ERR_INVALID;
+    }
+    
+    file_handle_t* handle = (file_handle_t*)fp;
+    
+    // Get the dmdrvi_sync function
+    dmod_dmdrvi_sync_t dmdrvi_sync = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_sync_sig);
+    if(dmdrvi_sync == NULL)
+    {
+        // Sync not supported by driver, return OK
+        return DMFSI_OK;
+    }
+    
+    int result = dmdrvi_sync(handle->driver->driver_context, handle->driver_file);
+    if(result != 0)
+    {
+        return DMFSI_ERR_GENERAL;
+    }
+    
     return DMFSI_OK;
 }
 
@@ -530,8 +768,35 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _unlink, (dmfsi_context_t ctx
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement file deletion
-    return DMFSI_ERR_GENERAL;
+    if(path == NULL)
+    {
+        DMOD_LOG_ERROR("NULL path in unlink\n");
+        return DMFSI_ERR_INVALID;
+    }
+    
+    // Find the driver node for this file
+    driver_node_t* driver_node = find_driver_node(ctx, path);
+    if(driver_node == NULL)
+    {
+        DMOD_LOG_ERROR("File not found: %s\n", path);
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    // Get the dmdrvi_unlink function
+    dmod_dmdrvi_unlink_t dmdrvi_unlink = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_unlink_sig);
+    if(dmdrvi_unlink == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_unlink\n");
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    int result = dmdrvi_unlink(driver_node->driver_context, path);
+    if(result != 0)
+    {
+        return DMFSI_ERR_GENERAL;
+    }
+    
+    return DMFSI_OK;
 }
 
 /**
@@ -545,8 +810,35 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _rename, (dmfsi_context_t ctx
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement file renaming
-    return DMFSI_ERR_GENERAL;
+    if(oldpath == NULL || newpath == NULL)
+    {
+        DMOD_LOG_ERROR("NULL path in rename\n");
+        return DMFSI_ERR_INVALID;
+    }
+    
+    // Find the driver node for the old file
+    driver_node_t* driver_node = find_driver_node(ctx, oldpath);
+    if(driver_node == NULL)
+    {
+        DMOD_LOG_ERROR("File not found: %s\n", oldpath);
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    // Get the dmdrvi_rename function
+    dmod_dmdrvi_rename_t dmdrvi_rename = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_rename_sig);
+    if(dmdrvi_rename == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_rename\n");
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    int result = dmdrvi_rename(driver_node->driver_context, oldpath, newpath);
+    if(result != 0)
+    {
+        return DMFSI_ERR_GENERAL;
+    }
+    
+    return DMFSI_OK;
 }
 
 
