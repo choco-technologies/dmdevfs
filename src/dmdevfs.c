@@ -16,7 +16,6 @@
 #include "dmini.h"
 #include "dmdrvi.h"
 #include <string.h>
-#include <stdio.h>
 #include <stdbool.h>
 
 /** 
@@ -41,6 +40,8 @@ typedef struct
 {
     size_t current_index;    // Current position in the driver list
     bool is_open;            // Whether the directory is open
+    char path[256];          // Path being listed
+    driver_node_t* parent_driver;  // Parent driver for subdirectory listing (NULL for root)
 } dir_handle_t;
 
 /**
@@ -67,6 +68,8 @@ static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_
 static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool was_enabled);
 static void build_device_filename(const driver_node_t* driver_node, char* filename, size_t size);
 static bool is_root_path(const char* path);
+static driver_node_t* find_driver_by_subdir(dmfsi_context_t ctx, const char* path);
+static bool path_is_device_subdir(dmfsi_context_t ctx, const char* path);
 
 // ============================================================================
 //                      Module Interface Implementation
@@ -109,20 +112,20 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
 {
     if(config == NULL)
     {
-        DMOD_LOG_ERROR("dmdevfs: Config path is NULL\n");
+        DMOD_LOG_ERROR("Config path is NULL\n");
         return NULL;
     }
 
     if(strlen(config) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Config path is empty\n");
+        DMOD_LOG_ERROR("Config path is empty\n");
         return NULL;
     }
 
     dmfsi_context_t ctx = Dmod_Malloc(sizeof(struct dmfsi_context));
     if (ctx == NULL)
     {
-        DMOD_LOG_ERROR("dmdevfs: Failed to allocate memory for context\n");
+        DMOD_LOG_ERROR("Failed to allocate memory for context\n");
         return NULL;
     }
     
@@ -133,7 +136,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     int res = configure_drivers(ctx, NULL, ctx->config_path);
     if (res != DMFSI_OK)
     {
-        DMOD_LOG_ERROR("dmdevfs: Failed to configure drivers\n");
+        DMOD_LOG_ERROR("Failed to configure drivers\n");
         unconfigure_drivers(ctx);
         dmlist_destroy(ctx->drivers);
         Dmod_Free(ctx->config_path);
@@ -159,7 +162,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _deinit, (dmfsi_context_t ctx
 {
     if (!dmfsi_dmdevfs_context_is_valid(ctx))
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in deinit\n");
+        DMOD_LOG_ERROR("Invalid context in deinit\n");
         return DMFSI_ERR_INVALID;
     }
 
@@ -177,12 +180,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in fopen\n");
+        DMOD_LOG_ERROR("Invalid context in fopen\n");
         return DMFSI_ERR_INVALID;
     }
     
     // TODO: Implement file opening through driver
-    DMOD_LOG_ERROR("dmdevfs: fopen not yet implemented\n");
+    DMOD_LOG_ERROR("fopen not yet implemented\n");
     return DMFSI_ERR_GENERAL;
 }
 
@@ -193,12 +196,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fclose, (dmfsi_context_t ctx
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in fclose\n");
+        DMOD_LOG_ERROR("Invalid context in fclose\n");
         return DMFSI_ERR_INVALID;
     }
     
     // TODO: Implement file closing
-    DMOD_LOG_ERROR("dmdevfs: fclose not yet implemented\n");
+    DMOD_LOG_ERROR("fclose not yet implemented\n");
     return DMFSI_ERR_GENERAL;
 }
 
@@ -209,7 +212,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in fread\n");
+        DMOD_LOG_ERROR("Invalid context in fread\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -225,7 +228,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in fwrite\n");
+        DMOD_LOG_ERROR("Invalid context in fwrite\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -241,7 +244,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _lseek, (dmfsi_context_t ctx,
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in lseek\n");
+        DMOD_LOG_ERROR("Invalid context in lseek\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -256,7 +259,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx,
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in tell\n");
+        DMOD_LOG_ERROR("Invalid context in tell\n");
         return -1;
     }
     
@@ -271,7 +274,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, v
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in eof\n");
+        DMOD_LOG_ERROR("Invalid context in eof\n");
         return 1;
     }
     
@@ -286,7 +289,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _size, (dmfsi_context_t ctx,
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in size\n");
+        DMOD_LOG_ERROR("Invalid context in size\n");
         return -1;
     }
     
@@ -301,7 +304,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _getc, (dmfsi_context_t ctx, 
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in getc\n");
+        DMOD_LOG_ERROR("Invalid context in getc\n");
         return -1;
     }
     
@@ -316,7 +319,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _putc, (dmfsi_context_t ctx, 
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in putc\n");
+        DMOD_LOG_ERROR("Invalid context in putc\n");
         return -1;
     }
     
@@ -331,7 +334,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fflush, (dmfsi_context_t ctx
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in fflush\n");
+        DMOD_LOG_ERROR("Invalid context in fflush\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -346,7 +349,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _sync, (dmfsi_context_t ctx, 
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in sync\n");
+        DMOD_LOG_ERROR("Invalid context in sync\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -361,26 +364,49 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in opendir\n");
+        DMOD_LOG_ERROR("Invalid context in opendir\n");
         return DMFSI_ERR_INVALID;
     }
     
-    // Only support opening root directory
+    dir_handle_t* dir = Dmod_Malloc(sizeof(dir_handle_t));
+    if (dir == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate directory handle\n");
+        return DMFSI_ERR_GENERAL;
+    }
+    
+    dir->current_index = 0;
+    dir->is_open = true;
+    dir->parent_driver = NULL;
+    
+    // Store the path
+    if (path != NULL)
+    {
+        Dmod_StrNCpy(dir->path, path, sizeof(dir->path) - 1);
+        dir->path[sizeof(dir->path) - 1] = '\0';
+    }
+    else
+    {
+        dir->path[0] = '\0';
+    }
+    
+    // Check if opening root directory
     if (is_root_path(path))
     {
-        dir_handle_t* dir = Dmod_Malloc(sizeof(dir_handle_t));
-        if (dir == NULL)
-        {
-            DMOD_LOG_ERROR("dmdevfs: Failed to allocate directory handle\n");
-            return DMFSI_ERR_GENERAL;
-        }
-        
-        dir->current_index = 0;
-        dir->is_open = true;
         *dp = dir;
         return DMFSI_OK;
     }
     
+    // Check if opening a device subdirectory (e.g., /uart0/)
+    driver_node_t* parent = find_driver_by_subdir(ctx, path);
+    if (parent != NULL)
+    {
+        dir->parent_driver = parent;
+        *dp = dir;
+        return DMFSI_OK;
+    }
+    
+    Dmod_Free(dir);
     return DMFSI_ERR_NOT_FOUND;
 }
 
@@ -391,7 +417,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in readdir\n");
+        DMOD_LOG_ERROR("Invalid context in readdir\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -406,26 +432,69 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
         return DMFSI_ERR_INVALID;
     }
     
-    size_t driver_count = dmlist_size(ctx->drivers);
-    if (dir->current_index >= driver_count)
+    // If listing a subdirectory (parent_driver is set), return minor device entries
+    if (dir->parent_driver != NULL)
     {
-        return DMFSI_ERR_NOT_FOUND;  // No more entries
-    }
-    
-    driver_node_t* driver_node = (driver_node_t*)dmlist_get(ctx->drivers, dir->current_index);
-    if (driver_node == NULL)
-    {
+        // For subdirectories, we only have one entry: the minor number
+        if (dir->current_index > 0)
+        {
+            return DMFSI_ERR_NOT_FOUND;  // Only one entry
+        }
+        
+        // Return the minor number as filename
+        Dmod_SnPrintf(entry->name, sizeof(entry->name), "%d", dir->parent_driver->dev_num.minor);
+        entry->is_directory = false;
+        entry->size = 0;
         dir->current_index++;
-        return DMFSI_ERR_GENERAL;
+        return DMFSI_OK;
     }
     
-    // Build device filename based on dev_num flags
-    build_device_filename(driver_node, entry->name, sizeof(entry->name));
-    entry->is_directory = false;
-    entry->size = 0;
+    // Listing root directory - iterate through drivers
+    size_t driver_count = dmlist_size(ctx->drivers);
     
-    dir->current_index++;
-    return DMFSI_OK;
+    while (dir->current_index < driver_count)
+    {
+        driver_node_t* driver_node = (driver_node_t*)dmlist_get(ctx->drivers, dir->current_index);
+        dir->current_index++;
+        
+        if (driver_node == NULL)
+        {
+            continue;
+        }
+        
+        // Build device name
+        if (driver_node->dev_num.flags == DMDRVI_NUM_NONE)
+        {
+            // Simple device file
+            Dmod_SnPrintf(entry->name, sizeof(entry->name), "%s", driver_node->driver_name);
+            entry->is_directory = false;
+        }
+        else if (driver_node->dev_num.flags & DMDRVI_NUM_MINOR)
+        {
+            // Directory with major number (contains minor device files)
+            Dmod_SnPrintf(entry->name, sizeof(entry->name), "%s%d", 
+                         driver_node->driver_name, driver_node->dev_num.major);
+            entry->is_directory = true;
+        }
+        else if (driver_node->dev_num.flags & DMDRVI_NUM_MAJOR)
+        {
+            // Device file with major number only
+            Dmod_SnPrintf(entry->name, sizeof(entry->name), "%s%d", 
+                         driver_node->driver_name, driver_node->dev_num.major);
+            entry->is_directory = false;
+        }
+        else
+        {
+            // Fallback
+            Dmod_SnPrintf(entry->name, sizeof(entry->name), "%s", driver_node->driver_name);
+            entry->is_directory = false;
+        }
+        
+        entry->size = 0;
+        return DMFSI_OK;
+    }
+    
+    return DMFSI_ERR_NOT_FOUND;  // No more entries
 }
 
 /**
@@ -435,7 +504,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _closedir, (dmfsi_context_t c
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in closedir\n");
+        DMOD_LOG_ERROR("Invalid context in closedir\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -465,12 +534,18 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _direxists, (dmfsi_context_t 
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in direxists\n");
+        DMOD_LOG_ERROR("Invalid context in direxists\n");
         return 0;
     }
     
-    // Only root directory exists
-    return is_root_path(path) ? 1 : 0;
+    // Check if root directory
+    if (is_root_path(path))
+    {
+        return 1;
+    }
+    
+    // Check if it's a device subdirectory
+    return path_is_device_subdir(ctx, path) ? 1 : 0;
 }
 
 /**
@@ -480,7 +555,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _stat, (dmfsi_context_t ctx, 
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in stat\n");
+        DMOD_LOG_ERROR("Invalid context in stat\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -495,7 +570,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _unlink, (dmfsi_context_t ctx
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in unlink\n");
+        DMOD_LOG_ERROR("Invalid context in unlink\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -510,7 +585,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _rename, (dmfsi_context_t ctx
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in rename\n");
+        DMOD_LOG_ERROR("Invalid context in rename\n");
         return DMFSI_ERR_INVALID;
     }
     
@@ -531,7 +606,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
     void* dir = Dmod_OpenDir(config_path);
     if (dir == NULL)
     {
-        DMOD_LOG_ERROR("dmdevfs: Failed to open config directory: %s\n", ctx->config_path);
+        DMOD_LOG_ERROR("Failed to open config directory: %s\n", ctx->config_path);
         return DMFSI_ERR_NOT_FOUND;
     }
 
@@ -544,7 +619,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             dmini_context_t config_ctx = read_driver_for_config(entry, module_name, sizeof(module_name), driver_name);
             if (config_ctx == NULL)
             {
-                DMOD_LOG_ERROR("dmdevfs: Failed to read driver for config: %s\n", entry);
+                DMOD_LOG_ERROR("Failed to read driver for config: %s\n", entry);
                 continue;
             }
 
@@ -552,12 +627,12 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             dmini_destroy(config_ctx);
             if (driver_node == NULL)
             {
-                DMOD_LOG_ERROR("dmdevfs: Failed to configure driver: %s\n", module_name);
+                DMOD_LOG_ERROR("Failed to configure driver: %s\n", module_name);
                 continue;
             }
             if(dmlist_push_back(ctx->drivers, driver_node) != 0)
             {
-                DMOD_LOG_ERROR("dmdevfs: Failed to add driver to list: %s\n", module_name);
+                DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
                 Dmod_Free(driver_node);
                 continue;
             }
@@ -570,7 +645,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             int res = configure_drivers(ctx, driver_name, entry);
             if (res != DMFSI_OK)
             {
-                DMOD_LOG_ERROR("dmdevfs: Failed to configure drivers in directory: %s\n", entry);
+                DMOD_LOG_ERROR("Failed to configure drivers in directory: %s\n", entry);
             }
         }
     }
@@ -622,21 +697,10 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         return NULL;
     }
 
-    // Log device file information based on dev_num flags
-    if (driver_node->dev_num.flags == DMDRVI_NUM_NONE)
-    {
-        Dmod_Printf("dmdevfs: Device created: %s\n", driver_name);
-    }
-    else if (driver_node->dev_num.flags & DMDRVI_NUM_MINOR)
-    {
-        Dmod_Printf("dmdevfs: Device created: %s%d/%d (major/minor)\n", 
-                    driver_name, driver_node->dev_num.major, driver_node->dev_num.minor);
-    }
-    else if (driver_node->dev_num.flags & DMDRVI_NUM_MAJOR)
-    {
-        Dmod_Printf("dmdevfs: Device created: %s%d (major)\n", 
-                    driver_name, driver_node->dev_num.major);
-    }
+    // Log device file creation
+    char device_name[256];
+    build_device_filename(driver_node, device_name, sizeof(device_name));
+    DMOD_LOG_INFO("Device created: %s\n", device_name);
 
     return driver_node;
 }
@@ -699,14 +763,14 @@ static dmini_context_t read_driver_for_config(const char* config_path, char* dri
     dmini_context_t ctx = dmini_create();
     if (ctx == NULL)
     {
-        DMOD_LOG_ERROR("dmdevfs: Failed to create INI context\n");
+        DMOD_LOG_ERROR("Failed to create INI context\n");
         return NULL;
     }
 
     int res = dmini_parse_file(ctx, config_path);
     if (res != DMINI_OK)
     {
-        DMOD_LOG_ERROR("dmdevfs: Failed to parse INI file: %s\n", config_path);
+        DMOD_LOG_ERROR("Failed to parse INI file: %s\n", config_path);
         dmini_destroy(ctx);
         return NULL;  
     }
@@ -790,32 +854,21 @@ static void build_device_filename(const driver_node_t* driver_node, char* filena
         return;
     }
     
-    if (driver_node->dev_num.flags == DMDRVI_NUM_NONE)
+    // Build device name - start with driver name
+    Dmod_SnPrintf(filename, size, "%s", driver_node->driver_name);
+    
+    // Append major number if present
+    if (driver_node->dev_num.flags & DMDRVI_NUM_MAJOR)
     {
-        // Device file: /dev/dmclk -> dmclk (no /dev prefix needed)
-        snprintf(filename, size, "%s", driver_node->driver_name);
+        size_t len = Dmod_StrLen(filename);
+        Dmod_SnPrintf(filename + len, size - len, "%d", driver_node->dev_num.major);
     }
-    else if (driver_node->dev_num.flags & DMDRVI_NUM_MINOR)
+    
+    // Append minor number if present (with directory separator)
+    if (driver_node->dev_num.flags & DMDRVI_NUM_MINOR)
     {
-        // Device file: /dev/dmspi0/0 -> dmspi0/0
-        // This represents a directory structure with major and minor numbers
-        // TODO: Implement proper nested directory support in opendir/readdir
-        snprintf(filename, size, "%s%d/%d", 
-                 driver_node->driver_name, 
-                 driver_node->dev_num.major, 
-                 driver_node->dev_num.minor);
-    }
-    else if (driver_node->dev_num.flags & DMDRVI_NUM_MAJOR)
-    {
-        // Device file: /dev/dmuart0 -> dmuart0
-        snprintf(filename, size, "%s%d", 
-                 driver_node->driver_name, 
-                 driver_node->dev_num.major);
-    }
-    else
-    {
-        // Fallback to driver name only
-        snprintf(filename, size, "%s", driver_node->driver_name);
+        size_t len = Dmod_StrLen(filename);
+        Dmod_SnPrintf(filename + len, size - len, "/%d", driver_node->dev_num.minor);
     }
 }
 
@@ -838,5 +891,79 @@ static bool is_root_path(const char* path)
     }
     
     return false;
+}
+
+/**
+ * @brief Find a driver that has a subdirectory matching the given path
+ * 
+ * @param ctx Filesystem context
+ * @param path Path to search for (e.g., "/uart0" or "uart0")
+ * @return Pointer to driver node if found, NULL otherwise
+ */
+static driver_node_t* find_driver_by_subdir(dmfsi_context_t ctx, const char* path)
+{
+    if (ctx == NULL || path == NULL)
+    {
+        return NULL;
+    }
+    
+    // Skip leading slash if present
+    const char* search_path = path;
+    if (path[0] == '/')
+    {
+        search_path = path + 1;
+    }
+    
+    size_t driver_count = dmlist_size(ctx->drivers);
+    for (size_t i = 0; i < driver_count; i++)
+    {
+        driver_node_t* driver_node = (driver_node_t*)dmlist_get(ctx->drivers, i);
+        if (driver_node == NULL)
+        {
+            continue;
+        }
+        
+        // Only drivers with MINOR flag create subdirectories
+        if (!(driver_node->dev_num.flags & DMDRVI_NUM_MINOR))
+        {
+            continue;
+        }
+        
+        // Build expected directory name: drivername + major number
+        char dir_name[256];
+        Dmod_SnPrintf(dir_name, sizeof(dir_name), "%s%d", 
+                     driver_node->driver_name, driver_node->dev_num.major);
+        
+        // Check if path matches (with or without trailing slash)
+        size_t dir_len = Dmod_StrLen(dir_name);
+        size_t path_len = Dmod_StrLen(search_path);
+        
+        if (path_len == dir_len && strcmp(search_path, dir_name) == 0)
+        {
+            return driver_node;
+        }
+        
+        // Also check with trailing slash
+        if (path_len == dir_len + 1 && 
+            Dmod_StrNCmp(search_path, dir_name, dir_len) == 0 &&
+            search_path[dir_len] == '/')
+        {
+            return driver_node;
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * @brief Check if a path corresponds to a device subdirectory
+ * 
+ * @param ctx Filesystem context
+ * @param path Path to check
+ * @return true if path is a device subdirectory, false otherwise
+ */
+static bool path_is_device_subdir(dmfsi_context_t ctx, const char* path)
+{
+    return find_driver_by_subdir(ctx, path) != NULL;
 }
 }
