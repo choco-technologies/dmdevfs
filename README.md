@@ -72,7 +72,7 @@ cmake --build .
 
 ## Usage
 
-The module can be loaded and mounted using DMVFS:
+The module can be loaded and mounted using DMVFS. The module name is `dmdfs` and you must provide a path to a configuration directory containing `*.ini` files for drivers:
 
 ```c
 #include "dmvfs.h"
@@ -80,19 +80,37 @@ The module can be loaded and mounted using DMVFS:
 // Initialize DMVFS
 dmvfs_init(16, 32);
 
-// Mount the driver filesystem at /mnt
-dmvfs_mount_fs("dmdevfs", "/mnt", NULL);
+// Mount the driver filesystem at /dev
+// The config parameter should point to a directory containing .ini files
+dmvfs_mount_fs("dmdfs", "/dev", "/path/to/config");
 
-// Use standard file operations
+// Access device files
 void* fp;
-dmvfs_fopen(&fp, "/mnt/file.txt", DMFSI_O_RDONLY, 0, 0);
-// ... use file ...
+dmvfs_fopen(&fp, "/dev/dmclk", DMFSI_O_RDWR, 0, 0);
+// ... use device ...
 dmvfs_fclose(fp);
 
 // Unmount when done
-dmvfs_unmount_fs("/mnt");
+dmvfs_unmount_fs("/dev");
 dmvfs_deinit();
 ```
+
+### Configuration Files
+
+The configuration directory should contain `.ini` files for each driver. Each file can specify the driver name in the `[main]` section, or the driver name will be derived from the filename (without `.ini` extension).
+
+Example configuration file (`/path/to/config/dmclk.ini`):
+```ini
+; Clock driver configuration
+[main]
+driver_name=dmclk
+
+; Additional driver-specific configuration
+[settings]
+frequency=100000
+```
+
+If `driver_name` is not specified, the filename will be used (e.g., `dmclk.ini` → driver name `dmclk`).
 
 ## API
 

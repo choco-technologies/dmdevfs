@@ -16,6 +16,7 @@
 #include "dmini.h"
 #include "dmdrvi.h"
 #include <string.h>
+#include <stdio.h>
 
 /** 
  * @brief Magic number for DMDEVFS context validation
@@ -29,7 +30,17 @@ typedef struct
     dmdrvi_dev_num_t dev_num;           // Device number assigned to the driver
     bool was_loaded;                    // Indicates if the driver was loaded by dmdevfs
     bool was_enabled;                   // Indicates if the driver was enabled by dmdevfs
+    char driver_name[DMOD_MAX_MODULE_NAME_LENGTH];  // Driver name for device file naming
 } driver_node_t;
+
+/**
+ * @brief Directory handle for directory operations
+ */
+typedef struct
+{
+    size_t current_index;    // Current position in the driver list
+    bool is_open;            // Whether the directory is open
+} dir_handle_t;
 
 /**
  * @brief File system context structure
@@ -53,6 +64,7 @@ static void read_base_name(const char* path, char* base_name, size_t name_size);
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver);
 static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_loaded, bool* was_enabled);
 static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool was_enabled);
+static void build_device_filename(const driver_node_t* driver_node, char* filename, size_t size);
 
 // ============================================================================
 //                      Module Interface Implementation
@@ -351,8 +363,23 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement directory opening
-    return DMFSI_ERR_GENERAL;
+    // Only support opening root directory
+    if (path == NULL || strlen(path) == 0 || strcmp(path, "/") == 0)
+    {
+        dir_handle_t* dir = Dmod_Malloc(sizeof(dir_handle_t));
+        if (dir == NULL)
+        {
+            DMOD_LOG_ERROR("dmdevfs: Failed to allocate directory handle\n");
+            return DMFSI_ERR_GENERAL;
+        }
+        
+        dir->current_index = 0;
+        dir->is_open = true;
+        *dp = dir;
+        return DMFSI_OK;
+    }
+    
+    return DMFSI_ERR_NOT_FOUND;
 }
 
 /**
@@ -366,8 +393,37 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement directory reading
-    return DMFSI_ERR_NOT_FOUND;
+    if (dp == NULL || entry == NULL)
+    {
+        return DMFSI_ERR_INVALID;
+    }
+    
+    dir_handle_t* dir = (dir_handle_t*)dp;
+    if (!dir->is_open)
+    {
+        return DMFSI_ERR_INVALID;
+    }
+    
+    size_t driver_count = dmlist_size(ctx->drivers);
+    if (dir->current_index >= driver_count)
+    {
+        return DMFSI_ERR_NOT_FOUND;  // No more entries
+    }
+    
+    driver_node_t* driver_node = (driver_node_t*)dmlist_get(ctx->drivers, dir->current_index);
+    if (driver_node == NULL)
+    {
+        dir->current_index++;
+        return DMFSI_ERR_GENERAL;
+    }
+    
+    // Build device filename based on dev_num flags
+    build_device_filename(driver_node, entry->name, sizeof(entry->name));
+    entry->is_directory = false;
+    entry->size = 0;
+    
+    dir->current_index++;
+    return DMFSI_OK;
 }
 
 /**
@@ -381,7 +437,14 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _closedir, (dmfsi_context_t c
         return DMFSI_ERR_INVALID;
     }
     
-    // TODO: Implement directory closing
+    if (dp != NULL)
+    {
+        dir_handle_t* dir = (dir_handle_t*)dp;
+        dir->is_open = false;
+        Dmod_Free(dp);
+        return DMFSI_OK;
+    }
+    
     return DMFSI_ERR_GENERAL;
 }
 
@@ -404,7 +467,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _direxists, (dmfsi_context_t 
         return 0;
     }
     
-    // TODO: Implement directory existence check
+    // Only root directory exists
+    if (path == NULL || strlen(path) == 0 || strcmp(path, "/") == 0)
+    {
+        return 1;
+    }
+    
     return 0;
 }
 
@@ -545,6 +613,9 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->was_loaded = was_loaded;
     driver_node->was_enabled = was_enabled;
     driver_node->driver = driver;
+    strncpy(driver_node->driver_name, driver_name, DMOD_MAX_MODULE_NAME_LENGTH - 1);
+    driver_node->driver_name[DMOD_MAX_MODULE_NAME_LENGTH - 1] = '\0';
+    
     driver_node->driver_context = dmdrvi_create(config_ctx, &driver_node->dev_num);
     if (driver_node->driver_context == NULL)
     {
@@ -552,6 +623,22 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         cleanup_driver_module(driver_name, was_loaded, was_enabled);
         Dmod_Free(driver_node);
         return NULL;
+    }
+
+    // Log device file information based on dev_num flags
+    if (driver_node->dev_num.flags == DMDRVI_NUM_NONE)
+    {
+        Dmod_Printf("dmdevfs: Device created: %s\n", driver_name);
+    }
+    else if (driver_node->dev_num.flags & DMDRVI_NUM_MINOR)
+    {
+        Dmod_Printf("dmdevfs: Device created: %s%d/%d (major/minor)\n", 
+                    driver_name, driver_node->dev_num.major, driver_node->dev_num.minor);
+    }
+    else if (driver_node->dev_num.flags & DMDRVI_NUM_MAJOR)
+    {
+        Dmod_Printf("dmdevfs: Device created: %s%d (major)\n", 
+                    driver_name, driver_node->dev_num.major);
     }
 
     return driver_node;
@@ -683,5 +770,38 @@ static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool
     if(!was_loaded)
     {
         Dmod_UnloadModule(driver_name, false);
+    }
+}
+
+/**
+ * @brief Build device filename based on dev_num flags
+ */
+static void build_device_filename(const driver_node_t* driver_node, char* filename, size_t size)
+{
+    if (driver_node->dev_num.flags == DMDRVI_NUM_NONE)
+    {
+        // Device file: /dev/dmclk -> dmclk (no /dev prefix needed)
+        snprintf(filename, size, "%s", driver_node->driver_name);
+    }
+    else if (driver_node->dev_num.flags & DMDRVI_NUM_MINOR)
+    {
+        // Device file: /dev/dmspi0/0 -> dmspi0/0
+        // This creates a directory structure with major and minor
+        snprintf(filename, size, "%s%d/%d", 
+                 driver_node->driver_name, 
+                 driver_node->dev_num.major, 
+                 driver_node->dev_num.minor);
+    }
+    else if (driver_node->dev_num.flags & DMDRVI_NUM_MAJOR)
+    {
+        // Device file: /dev/dmuart0 -> dmuart0
+        snprintf(filename, size, "%s%d", 
+                 driver_node->driver_name, 
+                 driver_node->dev_num.major);
+    }
+    else
+    {
+        // Fallback to driver name only
+        snprintf(filename, size, "%s", driver_node->driver_name);
     }
 }
