@@ -116,7 +116,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
         return NULL;
     }
 
-    if(strlen(config) == 0)
+    if(Dmod_StrLen(config) == 0)
     {
         DMOD_LOG_ERROR("Config path is empty\n");
         return NULL;
@@ -685,7 +685,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->was_loaded = was_loaded;
     driver_node->was_enabled = was_enabled;
     driver_node->driver = driver;
-    strncpy(driver_node->driver_name, driver_name, DMOD_MAX_MODULE_NAME_LENGTH - 1);
+    Dmod_StrNCpy(driver_node->driver_name, driver_name, DMOD_MAX_MODULE_NAME_LENGTH - 1);
     driver_node->driver_name[DMOD_MAX_MODULE_NAME_LENGTH - 1] = '\0';
     
     driver_node->driver_context = dmdrvi_create(config_ctx, &driver_node->dev_num);
@@ -751,7 +751,7 @@ static void read_base_name(const char* path, char* base_name, size_t name_size)
 {
     const char* last_slash = strrchr(path, '/');
     const char* name_start = (last_slash != NULL) ? last_slash + 1 : path;
-    strncpy(base_name, name_start, name_size);
+    Dmod_StrNCpy(base_name, name_start, name_size);
     base_name[name_size - 1] = '\0';
 }
 
@@ -778,7 +778,7 @@ static dmini_context_t read_driver_for_config(const char* config_path, char* dri
     const char* name = dmini_get_string(ctx, "main", "driver_name", default_driver);
     if(name != NULL)
     {
-        strncpy(driver_name, name, name_size);
+        Dmod_StrNCpy(driver_name, name, name_size);
         driver_name[name_size - 1] = '\0';
         return ctx;
     }
@@ -787,7 +787,7 @@ static dmini_context_t read_driver_for_config(const char* config_path, char* dri
 
     // cut the `.ini` extension if present
     char* ext = strrchr(driver_name, '.');
-    if (ext != NULL && strcmp(ext, ".ini") == 0)
+    if (ext != NULL && Dmod_StrCmp(ext, ".ini") == 0)
     {
         *ext = '\0';
     }
@@ -885,7 +885,7 @@ static bool is_root_path(const char* path)
         return true;
     }
     
-    if (path[0] == '\0' || strcmp(path, "/") == 0)
+    if (path[0] == '\0' || Dmod_StrCmp(path, "/") == 0)
     {
         return true;
     }
@@ -938,7 +938,7 @@ static driver_node_t* find_driver_by_subdir(dmfsi_context_t ctx, const char* pat
         size_t dir_len = Dmod_StrLen(dir_name);
         size_t path_len = Dmod_StrLen(search_path);
         
-        if (path_len == dir_len && strcmp(search_path, dir_name) == 0)
+        if (path_len == dir_len && Dmod_StrCmp(search_path, dir_name) == 0)
         {
             return driver_node;
         }
