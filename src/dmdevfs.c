@@ -66,6 +66,7 @@ static dmini_context_t read_driver_for_config(const char* config_path, char* dri
 static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_loaded, bool* was_enabled);
 static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool was_enabled);
 static void build_device_filename(const driver_node_t* driver_node, char* filename, size_t size);
+static bool is_root_path(const char* path);
 
 // ============================================================================
 //                      Module Interface Implementation
@@ -364,18 +365,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
         return DMFSI_ERR_INVALID;
     }
     
-    // Only support opening root directory (NULL or empty path means root, or explicit "/")
-    bool is_root = false;
-    if (path == NULL)
-    {
-        is_root = true;
-    }
-    else if (path[0] == '\0' || strcmp(path, "/") == 0)
-    {
-        is_root = true;
-    }
-    
-    if (is_root)
+    // Only support opening root directory
+    if (is_root_path(path))
     {
         dir_handle_t* dir = Dmod_Malloc(sizeof(dir_handle_t));
         if (dir == NULL)
@@ -478,23 +469,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _direxists, (dmfsi_context_t 
         return 0;
     }
     
-    // Only root directory exists (NULL or empty path means root, or explicit "/")
-    bool is_root = false;
-    if (path == NULL)
-    {
-        is_root = true;
-    }
-    else if (path[0] == '\0' || strcmp(path, "/") == 0)
-    {
-        is_root = true;
-    }
-    
-    if (is_root)
-    {
-        return 1;
-    }
-    
-    return 0;
+    // Only root directory exists
+    return is_root_path(path) ? 1 : 0;
 }
 
 /**
@@ -841,4 +817,26 @@ static void build_device_filename(const driver_node_t* driver_node, char* filena
         // Fallback to driver name only
         snprintf(filename, size, "%s", driver_node->driver_name);
     }
+}
+
+/**
+ * @brief Check if path represents the root directory
+ * 
+ * @param path Path to check (can be NULL)
+ * @return true if path is NULL, empty, or "/"
+ */
+static bool is_root_path(const char* path)
+{
+    if (path == NULL)
+    {
+        return true;
+    }
+    
+    if (path[0] == '\0' || strcmp(path, "/") == 0)
+    {
+        return true;
+    }
+    
+    return false;
+}
 }
