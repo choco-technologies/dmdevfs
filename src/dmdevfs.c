@@ -27,6 +27,8 @@ typedef struct
     dmdrvi_context_t driver_context;    // Driver-specific context
     Dmod_Context_t*  driver;            // Driver module context
     dmdrvi_dev_num_t dev_num;           // Device number assigned to the driver
+    bool was_loaded;                    // Indicates if the driver was loaded by dmdevfs
+    bool was_enabled;                   // Indicates if the driver was enabled by dmdevfs
 } driver_node_t;
 
 /**
@@ -45,6 +47,7 @@ struct dmfsi_context
 // ============================================================================
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path);
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx);
+static int unconfigure_drivers(dmfsi_context_t ctx);
 static bool is_file(const char* path);
 static void read_base_name(const char* path, char* base_name, size_t name_size);
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver);
@@ -117,8 +120,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     if (res != DMFSI_OK)
     {
         DMOD_LOG_ERROR("dmdevfs: Failed to configure drivers\n");
+        unconfigure_drivers(ctx);
         dmlist_destroy(ctx->drivers);
-        Dmod_Free((void*)ctx->config_path);
+        Dmod_Free(ctx->config_path);
         Dmod_Free(ctx);
         return NULL;
     }
@@ -127,24 +131,29 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
 }
 
 /**
- * @brief Deinitialize the file system
- */
-dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _deinit, (dmfsi_context_t ctx) )
-{
-    if (ctx)
-    {
-        // TODO: Cleanup driver context
-        Dmod_Free(ctx);
-    }
-    return DMFSI_OK;
-}
-
-/**
  * @brief Validate the file system context
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _context_is_valid, (dmfsi_context_t ctx) )
 {
     return (ctx && ctx->magic == DMDEVFS_CONTEXT_MAGIC) ? 1 : 0;
+}
+
+/**
+ * @brief Deinitialize the file system
+ */
+dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _deinit, (dmfsi_context_t ctx) )
+{
+    if (!dmfsi_dmdevfs_context_is_valid(ctx))
+    {
+        DMOD_LOG_ERROR("dmdevfs: Invalid context in deinit\n");
+        return DMFSI_ERR_INVALID;
+    }
+
+    unconfigure_drivers(ctx);
+    dmlist_destroy(ctx->drivers);
+    Dmod_Free(ctx->config_path);
+    Dmod_Free(ctx);
+    return DMFSI_OK;
 }
 
 /**
@@ -380,15 +389,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _closedir, (dmfsi_context_t c
  * @brief Create a directory
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _mkdir, (dmfsi_context_t ctx, const char* path) )
-{
-    if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
-    {
-        DMOD_LOG_ERROR("dmdevfs: Invalid context in mkdir\n");
-        return DMFSI_ERR_INVALID;
-    }
-    
-    // TODO: Implement directory creation
-    return DMFSI_ERR_GENERAL;
+{   
+    return DMFSI_ERR_INVALID; // Not supported
 }
 
 /**
@@ -540,6 +542,8 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         return NULL;
     }
 
+    driver_node->was_loaded = was_loaded;
+    driver_node->was_enabled = was_enabled;
     driver_node->driver = driver;
     driver_node->driver_context = dmdrvi_create(config_ctx, &driver_node->dev_num);
     if (driver_node->driver_context == NULL)
@@ -551,6 +555,37 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     }
 
     return driver_node;
+}
+
+/**
+ * @brief Unconfigure and unload all drivers
+ */
+static int unconfigure_drivers(dmfsi_context_t ctx)
+{
+    if (ctx == NULL || ctx->drivers == NULL)
+    {
+        return DMFSI_ERR_INVALID;
+    }
+
+    size_t list_size = dmlist_size(ctx->drivers);
+    for (size_t i = 0; i < list_size; i++)
+    {
+        driver_node_t* driver_node = (driver_node_t*)dmlist_get(ctx->drivers, i);
+        if (driver_node != NULL)
+        {
+            dmod_dmdrvi_free_t dmdrvi_free = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_free_sig);
+            if (dmdrvi_free != NULL)
+            {
+                dmdrvi_free(driver_node->driver_context);
+            }
+            cleanup_driver_module(Dmod_GetName(driver_node->driver), driver_node->was_loaded, driver_node->was_enabled);
+            Dmod_Free(driver_node);
+        }
+    }
+
+    dmlist_clear(ctx->drivers);
+
+    return DMFSI_OK;
 }
 
 /**
