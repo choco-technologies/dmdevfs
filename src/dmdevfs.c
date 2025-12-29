@@ -244,7 +244,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
     }
     
     handle->driver = driver_node;
-    handle->path = path;
+    handle->path = Dmod_StrDup(path);
     handle->mode = mode;
     handle->attr = attr;
     
@@ -276,6 +276,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fclose, (dmfsi_context_t ctx
     if(dmdrvi_close != NULL)
     {
         dmdrvi_close(handle->driver->driver_context, handle->driver_handle);
+    }
+    
+    // Free the path string that was duplicated in fopen
+    if(handle->path)
+    {
+        Dmod_Free((void*)handle->path);
     }
     
     Dmod_Free(handle);
@@ -441,7 +447,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _size, (dmfsi_context_t ctx,
     file_handle_t* handle = (file_handle_t*)fp;
     
     // Try to get size from stat if available
-    dmdrvi_stat_t stat;
+    dmdrvi_stat_t stat = {0};
     int result = driver_stat(handle->driver, handle->path, &stat);
     if(result == 0)
     {
