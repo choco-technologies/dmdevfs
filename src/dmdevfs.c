@@ -365,9 +365,15 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
     }
     
     // Only support opening root directory (NULL or empty path means root, or explicit "/")
-    bool is_root = (path == NULL) || 
-                   (path[0] == '\0') || 
-                   (strcmp(path, "/") == 0);
+    bool is_root = false;
+    if (path == NULL)
+    {
+        is_root = true;
+    }
+    else if (path[0] == '\0' || strcmp(path, "/") == 0)
+    {
+        is_root = true;
+    }
     
     if (is_root)
     {
@@ -473,9 +479,15 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _direxists, (dmfsi_context_t 
     }
     
     // Only root directory exists (NULL or empty path means root, or explicit "/")
-    bool is_root = (path == NULL) || 
-                   (path[0] == '\0') || 
-                   (strcmp(path, "/") == 0);
+    bool is_root = false;
+    if (path == NULL)
+    {
+        is_root = true;
+    }
+    else if (path[0] == '\0' || strcmp(path, "/") == 0)
+    {
+        is_root = true;
+    }
     
     if (is_root)
     {
@@ -789,9 +801,19 @@ static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool
  * This matches the dmdrvi interface specification. Full directory hierarchy support
  * would require implementing nested directory operations, which is left for future
  * enhancement when file I/O operations are implemented.
+ * 
+ * @param driver_node Pointer to driver node (must not be NULL)
+ * @param filename Output buffer for filename (must not be NULL)
+ * @param size Size of output buffer (must be > 0)
  */
 static void build_device_filename(const driver_node_t* driver_node, char* filename, size_t size)
 {
+    // Validate input parameters
+    if (driver_node == NULL || filename == NULL || size == 0)
+    {
+        return;
+    }
+    
     if (driver_node->dev_num.flags == DMDRVI_NUM_NONE)
     {
         // Device file: /dev/dmclk -> dmclk (no /dev prefix needed)
