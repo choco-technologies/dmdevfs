@@ -51,7 +51,7 @@ typedef struct
 typedef struct
 {
     driver_node_t* driver;      // Driver associated with this file
-    dmdrvi_file_t driver_file;  // Driver file handle
+    void* driver_handle;        // Driver device handle
     const char* path;           // File path
     int mode;                   // File open mode
     int attr;                   // File attributes
@@ -233,11 +233,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         return DMFSI_ERR_GENERAL;
     }
     
-    // Open the file through the driver
-    int result = dmdrvi_open(driver_node->driver_context, &handle->driver_file, path, mode, attr);
-    if(result != 0)
+    // Open the device through the driver
+    // Note: dmdrvi_open only takes context and flags, returns device handle
+    handle->driver_handle = dmdrvi_open(driver_node->driver_context, mode);
+    if(handle->driver_handle == NULL)
     {
-        DMOD_LOG_ERROR("Driver failed to open file: %s\n", path);
+        DMOD_LOG_ERROR("Driver failed to open device: %s\n", path);
         Dmod_Free(handle);
         return DMFSI_ERR_GENERAL;
     }
@@ -274,7 +275,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fclose, (dmfsi_context_t ctx
     dmod_dmdrvi_close_t dmdrvi_close = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_close_sig);
     if(dmdrvi_close != NULL)
     {
-        dmdrvi_close(handle->driver->driver_context, handle->driver_file);
+        dmdrvi_close(handle->driver->driver_context, handle->driver_handle);
     }
     
     Dmod_Free(handle);
@@ -310,12 +311,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
         return DMFSI_ERR_NOT_FOUND;
     }
     
-    int result = dmdrvi_read(handle->driver->driver_context, handle->driver_file, buffer, size, read);
-    if(result != 0)
-    {
-        if(read) *read = 0;
-        return DMFSI_ERR_GENERAL;
-    }
+    // dmdrvi_read returns size_t (bytes read), not error code
+    size_t bytes_read = dmdrvi_read(handle->driver->driver_context, handle->driver_handle, buffer, size);
+    if(read) *read = bytes_read;
     
     return DMFSI_OK;
 }
@@ -349,18 +347,16 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
         return DMFSI_ERR_NOT_FOUND;
     }
     
-    int result = dmdrvi_write(handle->driver->driver_context, handle->driver_file, buffer, size, written);
-    if(result != 0)
-    {
-        if(written) *written = 0;
-        return DMFSI_ERR_GENERAL;
-    }
+    // dmdrvi_write returns size_t (bytes written), not error code
+    size_t bytes_written = dmdrvi_write(handle->driver->driver_context, handle->driver_handle, buffer, size);
+    if(written) *written = bytes_written;
     
     return DMFSI_OK;
 }
 
 /**
  * @brief Seek to a position in a file
+ * @note Not supported for device drivers - devices are typically non-seekable
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _lseek, (dmfsi_context_t ctx, void* fp, long offset, int whence) )
 {
@@ -375,22 +371,15 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _lseek, (dmfsi_context_t ctx,
         return DMFSI_ERR_INVALID;
     }
     
-    file_handle_t* handle = (file_handle_t*)fp;
-    
-    // Get the dmdrvi_lseek function
-    dmod_dmdrvi_lseek_t dmdrvi_lseek = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_lseek_sig);
-    if(dmdrvi_lseek == NULL)
-    {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_lseek\n");
-        return DMFSI_ERR_NOT_FOUND;
-    }
-    
-    int result = dmdrvi_lseek(handle->driver->driver_context, handle->driver_file, offset, whence);
-    return result;
+    // Device drivers typically don't support seek operations
+    // Return error to indicate operation not supported
+    DMOD_LOG_ERROR("lseek not supported for device drivers\n");
+    return DMFSI_ERR_GENERAL;
 }
 
 /**
  * @brief Get current position in a file
+ * @note Not supported for device drivers - devices are typically non-seekable
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx, void* fp) )
 {
@@ -405,21 +394,14 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx,
         return -1;
     }
     
-    file_handle_t* handle = (file_handle_t*)fp;
-    
-    // Get the dmdrvi_tell function
-    dmod_dmdrvi_tell_t dmdrvi_tell = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_tell_sig);
-    if(dmdrvi_tell == NULL)
-    {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_tell\n");
-        return -1;
-    }
-    
-    return dmdrvi_tell(handle->driver->driver_context, handle->driver_file);
+    // Device drivers typically don't support tell operations
+    DMOD_LOG_ERROR("tell not supported for device drivers\n");
+    return -1;
 }
 
 /**
  * @brief Check if at end of file
+ * @note Device drivers typically operate in streaming mode - always return 0 (not at EOF)
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, void* fp) )
 {
@@ -434,21 +416,14 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, v
         return 1;
     }
     
-    file_handle_t* handle = (file_handle_t*)fp;
-    
-    // Get the dmdrvi_eof function
-    dmod_dmdrvi_eof_t dmdrvi_eof = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_eof_sig);
-    if(dmdrvi_eof == NULL)
-    {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_eof\n");
-        return 1;
-    }
-    
-    return dmdrvi_eof(handle->driver->driver_context, handle->driver_file);
+    // Device drivers typically don't have EOF concept
+    // Return 0 (not at EOF) as devices can always potentially provide more data
+    return 0;
 }
 
 /**
  * @brief Get file size
+ * @note Device drivers represent devices, not files with fixed sizes. Use stat for size info.
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _size, (dmfsi_context_t ctx, void* fp) )
 {
@@ -465,15 +440,16 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _size, (dmfsi_context_t ctx,
     
     file_handle_t* handle = (file_handle_t*)fp;
     
-    // Get the dmdrvi_size function
-    dmod_dmdrvi_size_t dmdrvi_size = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_size_sig);
-    if(dmdrvi_size == NULL)
+    // Try to get size from stat if available
+    dmdrvi_stat_t stat;
+    int result = driver_stat(handle->driver, handle->path, &stat);
+    if(result == 0)
     {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_size\n");
-        return -1;
+        return (long)stat.size;
     }
     
-    return dmdrvi_size(handle->driver->driver_context, handle->driver_file);
+    // Size not available for this device
+    return -1;
 }
 
 /**
@@ -558,7 +534,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fflush, (dmfsi_context_t ctx
         return DMFSI_OK;
     }
     
-    int result = dmdrvi_flush(handle->driver->driver_context, handle->driver_file);
+    int result = dmdrvi_flush(handle->driver->driver_context, handle->driver_handle);
     if(result != 0)
     {
         return DMFSI_ERR_GENERAL;
@@ -569,6 +545,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fflush, (dmfsi_context_t ctx
 
 /**
  * @brief Sync file to storage
+ * @note For device drivers, sync/flush are equivalent operations
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _sync, (dmfsi_context_t ctx, void* fp) )
 {
@@ -585,15 +562,15 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _sync, (dmfsi_context_t ctx, 
     
     file_handle_t* handle = (file_handle_t*)fp;
     
-    // Get the dmdrvi_sync function
-    dmod_dmdrvi_sync_t dmdrvi_sync = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_sync_sig);
-    if(dmdrvi_sync == NULL)
+    // Get the dmdrvi_flush function (sync and flush are equivalent for devices)
+    dmod_dmdrvi_flush_t dmdrvi_flush = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_flush_sig);
+    if(dmdrvi_flush == NULL)
     {
         // Sync not supported by driver, return OK
         return DMFSI_OK;
     }
     
-    int result = dmdrvi_sync(handle->driver->driver_context, handle->driver_file);
+    int result = dmdrvi_flush(handle->driver->driver_context, handle->driver_handle);
     if(result != 0)
     {
         return DMFSI_ERR_GENERAL;
@@ -759,6 +736,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _stat, (dmfsi_context_t ctx, 
 
 /**
  * @brief Delete a file
+ * @note Not supported for device drivers - devices cannot be deleted through filesystem operations
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _unlink, (dmfsi_context_t ctx, const char* path) )
 {
@@ -774,33 +752,14 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _unlink, (dmfsi_context_t ctx
         return DMFSI_ERR_INVALID;
     }
     
-    // Find the driver node for this file
-    driver_node_t* driver_node = find_driver_node(ctx, path);
-    if(driver_node == NULL)
-    {
-        DMOD_LOG_ERROR("File not found: %s\n", path);
-        return DMFSI_ERR_NOT_FOUND;
-    }
-    
-    // Get the dmdrvi_unlink function
-    dmod_dmdrvi_unlink_t dmdrvi_unlink = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_unlink_sig);
-    if(dmdrvi_unlink == NULL)
-    {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_unlink\n");
-        return DMFSI_ERR_NOT_FOUND;
-    }
-    
-    int result = dmdrvi_unlink(driver_node->driver_context, path);
-    if(result != 0)
-    {
-        return DMFSI_ERR_GENERAL;
-    }
-    
-    return DMFSI_OK;
+    // Device files cannot be deleted through filesystem operations
+    DMOD_LOG_ERROR("unlink not supported for device drivers\n");
+    return DMFSI_ERR_GENERAL;
 }
 
 /**
  * @brief Rename a file
+ * @note Not supported for device drivers - devices cannot be renamed through filesystem operations
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _rename, (dmfsi_context_t ctx, const char* oldpath, const char* newpath) )
 {
@@ -816,29 +775,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _rename, (dmfsi_context_t ctx
         return DMFSI_ERR_INVALID;
     }
     
-    // Find the driver node for the old file
-    driver_node_t* driver_node = find_driver_node(ctx, oldpath);
-    if(driver_node == NULL)
-    {
-        DMOD_LOG_ERROR("File not found: %s\n", oldpath);
-        return DMFSI_ERR_NOT_FOUND;
-    }
-    
-    // Get the dmdrvi_rename function
-    dmod_dmdrvi_rename_t dmdrvi_rename = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_rename_sig);
-    if(dmdrvi_rename == NULL)
-    {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_rename\n");
-        return DMFSI_ERR_NOT_FOUND;
-    }
-    
-    int result = dmdrvi_rename(driver_node->driver_context, oldpath, newpath);
-    if(result != 0)
-    {
-        return DMFSI_ERR_GENERAL;
-    }
-    
-    return DMFSI_OK;
+    // Device files cannot be renamed through filesystem operations
+    DMOD_LOG_ERROR("rename not supported for device drivers\n");
+    return DMFSI_ERR_GENERAL;
 }
 
 
