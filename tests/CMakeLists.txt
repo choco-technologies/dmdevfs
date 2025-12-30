@@ -22,12 +22,10 @@ add_test(NAME dmdevfs_dmf_directory
     COMMAND test -d ${CMAKE_BINARY_DIR}/dmf
 )
 
-# Test 3: Verify module files exist
-if(EXISTS "${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf")
-    add_test(NAME dmdevfs_dmf_file
-        COMMAND test -f ${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf
-    )
-endif()
+# Test 3: Verify module files exist (runtime check)
+add_test(NAME dmdevfs_dmf_file
+    COMMAND test -f ${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf
+)
 
 # Test 4: Check source file compilation
 add_test(NAME dmdevfs_source_compiled
@@ -39,5 +37,3 @@ message(STATUS "DMDEVFS tests configured")
 message(STATUS "  Module output directory: ${CMAKE_BINARY_DIR}/dmf")
 message(STATUS "  Run 'ctest' to verify the build")
 message(STATUS "  Note: Full integration tests require dmf-get tool and device drivers")
-
-
