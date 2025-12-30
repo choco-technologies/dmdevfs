@@ -87,3 +87,13 @@ dmod_link_modules(${DMOD_MODULE_NAME}
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+# ======================================================================
+#               Tests
+# ======================================================================
+option(DMDEVFS_BUILD_TESTS "Build tests" OFF)
+
+if(DMDEVFS_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
