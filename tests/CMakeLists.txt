@@ -23,11 +23,19 @@ add_test(NAME dmdevfs_dmf_directory
 )
 
 # Test 3: Verify module files exist (cross-platform)
+# We check if the file exists by trying to copy it to itself
 add_test(NAME dmdevfs_dmf_file
-    COMMAND ${CMAKE_COMMAND} -E cat ${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+        ${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf 
+        ${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf.test
 )
-set_tests_properties(dmdevfs_dmf_file PROPERTIES
-    PASS_REGULAR_EXPRESSION "."
+
+# Cleanup test file
+add_test(NAME dmdevfs_dmf_file_cleanup
+    COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf.test
+)
+set_tests_properties(dmdevfs_dmf_file_cleanup PROPERTIES
+    DEPENDS dmdevfs_dmf_file
 )
 
 # Test 4: Check source file compilation
