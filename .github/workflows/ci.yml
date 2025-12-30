@@ -30,3 +30,11 @@ jobs:
         run: |
           echo "Build completed successfully"
           ls -lh build/dmf/
+      
+      - name: Build and test
+        run: |
+          mkdir -p build_tests
+          cd build_tests
+          cmake .. -DDMOD_MODE=DMOD_MODULE -DDMDEVFS_BUILD_TESTS=ON
+          cmake --build .
+          ctest --output-on-failure --verbose

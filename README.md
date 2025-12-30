@@ -70,6 +70,20 @@ cmake .. -DDMOD_MODE=DMOD_MODULE
 cmake --build .
 ```
 
+### Building with Tests
+
+To build with test support:
+
+```bash
+mkdir build
+cd build
+cmake .. -DDMOD_MODE=DMOD_MODULE -DDMDEVFS_BUILD_TESTS=ON
+cmake --build .
+ctest --output-on-failure
+```
+
+See the [tests/README.md](tests/README.md) for more information about testing.
+
 ## Usage
 
 The module can be loaded and mounted using DMVFS:
