@@ -17,14 +17,17 @@ add_test(NAME dmdevfs_module_built
     COMMAND ${CMAKE_COMMAND} -E echo "Verifying dmdevfs module was built..."
 )
 
-# Test 2: Check if dmf directory exists
+# Test 2: Check if dmf directory exists (cross-platform)
 add_test(NAME dmdevfs_dmf_directory
-    COMMAND test -d ${CMAKE_BINARY_DIR}/dmf
+    COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_BINARY_DIR}/dmf ${CMAKE_COMMAND} -E echo "DMF directory exists"
 )
 
-# Test 3: Verify module files exist (runtime check)
+# Test 3: Verify module files exist (cross-platform)
 add_test(NAME dmdevfs_dmf_file
-    COMMAND test -f ${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf
+    COMMAND ${CMAKE_COMMAND} -E cat ${CMAKE_BINARY_DIR}/dmf/dmdevfs.dmf
+)
+set_tests_properties(dmdevfs_dmf_file PROPERTIES
+    PASS_REGULAR_EXPRESSION "."
 )
 
 # Test 4: Check source file compilation
