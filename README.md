@@ -218,18 +218,169 @@ stop_bits = 1
 4. **Driver Initialization**: The entire INI context is passed to the driver's `dmdrvi_create()` function
 5. **Device Mapping**: The driver is registered and becomes accessible through the filesystem
 
-### Configuration File Naming
+### Driver Name Resolution
 
-The filename (without `.ini` extension) can serve as a fallback driver name if `driver_name` is not specified in the file:
+DMDEVFS determines which driver module to load using a priority-based resolution mechanism. The driver name can be specified in three ways, checked in the following order:
+
+#### 1. From INI File Content (Highest Priority)
+
+The `driver_name` field in the `[main]` section explicitly specifies which driver to load:
 
 ```ini
-# File: my_custom_driver.ini
+# File: /etc/dmdevfs/storage.ini
 [main]
-# driver_name is optional if filename matches the module name
-parameter1 = value1
+driver_name = dmspiflash
+# ... other parameters
 ```
 
-In this case, DMDEVFS will attempt to load a module named `my_custom_driver`.
+This loads the `dmspiflash` driver module, regardless of the filename or directory.
+
+#### 2. From Configuration Filename (Fallback)
+
+If `driver_name` is not specified in the INI file, the basename of the configuration file (without `.ini` extension) is used:
+
+```ini
+# File: /etc/dmdevfs/dmi2ceeprom.ini
+[main]
+# No driver_name specified
+i2c_bus = 0
+device_address = 0x50
+```
+
+This loads the `dmi2ceeprom` driver module based on the filename.
+
+#### 3. From Directory Name (Hierarchical Configuration)
+
+When configuration files are organized in subdirectories, the directory name can be passed to nested configurations:
+
+```
+/etc/dmdevfs/
+└── dmspiflash/
+    ├── device0.ini    # Uses "dmspiflash" from directory name
+    └── device1.ini    # Uses "dmspiflash" from directory name
+```
+
+Each `.ini` file in the `dmspiflash/` directory will use `dmspiflash` as the default driver name unless overridden by the `driver_name` field in the file itself.
+
+**Example of Combined Usage:**
+
+```
+/etc/dmdevfs/
+├── flash.ini              # Uses filename: "flash" driver
+├── spi/
+│   ├── device0.ini        # Uses directory: "spi" driver
+│   └── device1.ini        # Uses directory: "spi" driver
+└── custom.ini             # Contains driver_name=dmi2ceeprom in file
+```
+
+### Device Numbering and Path Generation
+
+When a driver is initialized through its `dmdrvi_create()` function, it returns a device number structure (`dev_num`) that controls how the driver appears in the filesystem. This mechanism allows multiple instances of the same driver with different configurations.
+
+#### Device Number Structure
+
+The device number consists of:
+- **major**: Primary device identifier (typically for device type or bus)
+- **minor**: Secondary device identifier (typically for device instance)
+- **flags**: Indicates which numbers are provided (`DMDRVI_NUM_MAJOR`, `DMDRVI_NUM_MINOR`)
+
+#### Path Generation Rules
+
+The resulting filesystem path depends on which device numbers the driver provides:
+
+| Major | Minor | Resulting Path | Example |
+|-------|-------|----------------|---------|
+| ✓ | ✓ | `<driver_name><major>/<minor>` | `spiflash0/1` |
+| ✗ | ✓ | `<driver_name>x/<minor>` | `spiflashx/0` |
+| ✓ | ✗ | `<driver_name><major>` | `spiflash0` |
+| ✗ | ✗ | `<driver_name>` | `spiflash` |
+
+#### Examples
+
+**Example 1: Both Major and Minor Provided**
+
+Configuration file: `/etc/dmdevfs/spi0.ini`
+```ini
+[main]
+driver_name = dmspiflash
+spi_bus = 0        # Driver uses this to set major=0
+chip_select = 1    # Driver uses this to set minor=1
+```
+
+Resulting path: `/mnt/dmspiflash0/1` (assuming mounted at `/mnt`)
+
+**Example 2: Only Minor Provided**
+
+Configuration file: `/etc/dmdevfs/eeprom.ini`
+```ini
+[main]
+driver_name = dmi2ceeprom
+device_address = 0x50    # Driver uses this to set minor=0
+```
+
+Resulting path: `/mnt/dmi2ceepromx/0`
+
+**Example 3: Only Major Provided**
+
+Configuration file: `/etc/dmdevfs/uart.ini`
+```ini
+[main]
+driver_name = dmuartstorage
+uart_port = 2    # Driver uses this to set major=2
+```
+
+Resulting path: `/mnt/dmuartstorage2`
+
+**Example 4: No Device Numbers**
+
+Configuration file: `/etc/dmdevfs/generic.ini`
+```ini
+[main]
+driver_name = dmgenericdriver
+```
+
+Resulting path: `/mnt/dmgenericdriver`
+
+#### Multiple Device Instances
+
+You can configure multiple instances of the same driver by using separate configuration files:
+
+```
+/etc/dmdevfs/
+├── spi_flash0.ini    # major=0, minor=0 → /mnt/dmspiflash0/0
+├── spi_flash1.ini    # major=0, minor=1 → /mnt/dmspiflash0/1
+└── spi_flash2.ini    # major=1, minor=0 → /mnt/dmspiflash1/0
+```
+
+Or using hierarchical organization:
+
+```
+/etc/dmdevfs/dmspiflash/
+├── bus0_cs0.ini      # major=0, minor=0 → /mnt/dmspiflash0/0
+├── bus0_cs1.ini      # major=0, minor=1 → /mnt/dmspiflash0/1
+└── bus1_cs0.ini      # major=1, minor=0 → /mnt/dmspiflash1/0
+```
+
+#### Understanding the 'x' Notation
+
+When only a minor number is provided (major not set), the path uses `x` as a placeholder. This is useful when the driver doesn't use a major/minor hierarchy but still wants to enumerate devices:
+
+```
+/mnt/dmspiflashx/0
+/mnt/dmspiflashx/1
+/mnt/dmspiflashx/2
+```
+
+This convention keeps paths consistent and prevents naming collisions.
+
+#### Driver Implementation Notes
+
+The device numbers are determined by the driver itself based on the configuration parameters. For example:
+- An SPI flash driver might use `spi_bus` as the major number and `chip_select` as the minor number
+- An I2C driver might use only the `device_address` as the minor number
+- A generic driver might not use device numbers at all
+
+Consult your specific driver's documentation to understand how it uses configuration parameters to set device numbers.
 
 ### Best Practices
 
