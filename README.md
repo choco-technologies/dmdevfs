@@ -266,10 +266,10 @@ Each `.ini` file in the `dmspiflash/` directory will use `dmspiflash` as the def
 
 ```
 /etc/dmdevfs/
-├── flash.ini              # Uses filename: "flash" driver
-├── spi/
-│   ├── device0.ini        # Uses directory: "spi" driver
-│   └── device1.ini        # Uses directory: "spi" driver
+├── dmflash.ini            # Uses filename: "dmflash" driver
+├── dmspiflash/
+│   ├── device0.ini        # Uses directory: "dmspiflash" driver
+│   └── device1.ini        # Uses directory: "dmspiflash" driver
 └── custom.ini             # Contains driver_name=dmi2ceeprom in file
 ```
 
@@ -290,10 +290,10 @@ The resulting filesystem path depends on which device numbers the driver provide
 
 | Major | Minor | Resulting Path | Example |
 |-------|-------|----------------|---------|
-| ✓ | ✓ | `<driver_name><major>/<minor>` | `spiflash0/1` |
-| ✗ | ✓ | `<driver_name>x/<minor>` | `spiflashx/0` |
-| ✓ | ✗ | `<driver_name><major>` | `spiflash0` |
-| ✗ | ✗ | `<driver_name>` | `spiflash` |
+| ✓ | ✓ | `<driver_name><major>/<minor>` | `dmspiflash0/1` |
+| ✗ | ✓ | `<driver_name>x/<minor>` | `dmspiflashx/0` |
+| ✓ | ✗ | `<driver_name><major>` | `dmspiflash0` |
+| ✗ | ✗ | `<driver_name>` | `dmspiflash` |
 
 #### Examples
 
