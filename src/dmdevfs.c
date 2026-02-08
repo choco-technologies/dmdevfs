@@ -799,20 +799,40 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
     void* dir = Dmod_OpenDir(config_path);
     if (dir == NULL)
     {
-        DMOD_LOG_ERROR("Failed to open config directory: %s\n", ctx->config_path);
+        DMOD_LOG_ERROR("Failed to open config directory: %s\n", config_path);
         return DMFSI_ERR_NOT_FOUND;
     }
 
     const char* entry;
     while ((entry = Dmod_ReadDir(dir)) != NULL)
     {
-        if (is_file(entry))
+        // Construct full path for the entry
+        char full_path[MAX_PATH_LENGTH];
+        size_t config_path_len = strlen(config_path);
+        size_t entry_len = strlen(entry);
+        
+        // Check if we need a separator
+        bool needs_separator = (config_path_len > 0 && config_path[config_path_len - 1] != '/');
+        size_t required_len = config_path_len + (needs_separator ? 1 : 0) + entry_len + 1;
+        
+        if (required_len > MAX_PATH_LENGTH)
+        {
+            DMOD_LOG_ERROR("Path too long: %s/%s\n", config_path, entry);
+            continue;
+        }
+        
+        Dmod_SnPrintf(full_path, sizeof(full_path), "%s%s%s", 
+                      config_path, 
+                      needs_separator ? "/" : "", 
+                      entry);
+        
+        if (is_file(full_path))
         {
             char module_name[DMOD_MAX_MODULE_NAME_LENGTH];
-            dmini_context_t config_ctx = read_driver_for_config(entry, module_name, sizeof(module_name), driver_name);
+            dmini_context_t config_ctx = read_driver_for_config(full_path, module_name, sizeof(module_name), driver_name);
             if (config_ctx == NULL)
             {
-                DMOD_LOG_ERROR("Failed to read driver for config: %s\n", entry);
+                DMOD_LOG_ERROR("Failed to read driver for config: %s\n", full_path);
                 continue;
             }
 
@@ -835,10 +855,10 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             // read driver name from directory name
             char module_name[DMOD_MAX_MODULE_NAME_LENGTH];
             read_base_name(entry, module_name, sizeof(module_name));
-            int res = configure_drivers(ctx, driver_name, entry);
+            int res = configure_drivers(ctx, driver_name, full_path);
             if (res != DMFSI_OK)
             {
-                DMOD_LOG_ERROR("Failed to configure drivers in directory: %s\n", entry);
+                DMOD_LOG_ERROR("Failed to configure drivers in directory: %s\n", full_path);
             }
         }
     }
