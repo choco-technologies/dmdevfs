@@ -837,6 +837,16 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             }
 
             driver_node_t* driver_node = configure_driver(module_name, config_ctx);
+            
+            // Third priority: if driver with filename-based name failed and we have a parent directory name,
+            // try using the parent directory name as fallback
+            if (driver_node == NULL && driver_name != NULL && strcmp(module_name, driver_name) != 0)
+            {
+                DMOD_LOG_INFO("Driver '%s' not found, trying fallback to parent directory name '%s'\n", 
+                             module_name, driver_name);
+                driver_node = configure_driver(driver_name, config_ctx);
+            }
+            
             dmini_destroy(config_ctx);
             if (driver_node == NULL)
             {
@@ -1012,7 +1022,8 @@ static dmini_context_t read_driver_for_config(const char* config_path, char* dri
         return NULL;  
     }
 
-    const char* name = dmini_get_string(ctx, "main", "driver_name", default_driver);
+    // First priority: check if driver_name is explicitly set in INI file
+    const char* name = dmini_get_string(ctx, "main", "driver_name", NULL);
     if(name != NULL)
     {
         strncpy(driver_name, name, name_size);
@@ -1020,6 +1031,7 @@ static dmini_context_t read_driver_for_config(const char* config_path, char* dri
         return ctx;
     }
     
+    // Second priority: use filename (without .ini extension)
     read_base_name(config_path, driver_name, name_size);
 
     // cut the `.ini` extension if present
