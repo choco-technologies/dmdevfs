@@ -75,6 +75,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx);
 static int unconfigure_drivers(dmfsi_context_t ctx);
 static bool is_file(const char* path);
+static bool is_driver( const char* name);
 static void read_base_name(const char* path, char* base_name, size_t name_size);
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver);
 static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_loaded, bool* was_enabled);
@@ -855,6 +856,10 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             // read driver name from directory name
             char module_name[DMOD_MAX_MODULE_NAME_LENGTH];
             read_base_name(entry, module_name, sizeof(module_name));
+            if(is_driver(module_name))
+            {
+                driver_name = module_name;
+            }
             int res = configure_drivers(ctx, driver_name, full_path);
             if (res != DMFSI_OK)
             {
@@ -979,6 +984,15 @@ static bool is_file(const char* path)
     }
     
     return true;  // It's a file
+}
+
+/**
+ * @brief Check if a path is a directory
+ */
+static bool is_driver( const char* name)
+{
+    char module_name[DMOD_MAX_MODULE_NAME_LENGTH] = {0};
+    return Dmod_FindMatch(name, module_name, sizeof(module_name));
 }
 
 /**
