@@ -971,10 +971,10 @@ static bool is_file(const char* path)
     }
     
     // Try to open as directory - if it succeeds, it's a directory, not a file
-    void* dir = Dmod_OpenDir(path);
-    if (dir != NULL)
+    void* dir_handle = Dmod_OpenDir(path);
+    if (dir_handle != NULL)
     {
-        Dmod_CloseDir(dir);
+        Dmod_CloseDir(dir_handle);
         return false;  // It's a directory
     }
     
