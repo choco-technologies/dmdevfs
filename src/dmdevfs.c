@@ -840,7 +840,8 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             
             // Third priority: if driver with filename-based name failed and we have a parent directory name,
             // try using the parent directory name as fallback
-            if (driver_node == NULL && driver_name != NULL && strcmp(module_name, driver_name) != 0)
+            if (driver_node == NULL && driver_name != NULL && module_name[0] != '\0' && 
+                strcmp(module_name, driver_name) != 0)
             {
                 DMOD_LOG_INFO("Driver '%s' not found, trying fallback to parent directory name '%s'\n", 
                              module_name, driver_name);
