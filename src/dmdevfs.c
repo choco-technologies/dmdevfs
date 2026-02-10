@@ -871,6 +871,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
  */
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx)
 {
+    DMOD_LOG_VERBOSE("Configuring driver: %s\n", driver_name);
     bool was_loaded = false;
     bool was_enabled = false;
     Dmod_Context_t* driver = prepare_driver_module(driver_name, &was_loaded, &was_enabled);
@@ -919,6 +920,8 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         return NULL;
     }
 
+    DMOD_LOG_INFO("Configured driver: %s (path: %s)\n", driver_name, driver_node->path);
+
     return driver_node;
 }
 
@@ -942,6 +945,7 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
             if (dmdrvi_free != NULL)
             {
                 dmdrvi_free(driver_node->driver_context);
+                DMOD_LOG_INFO("Freed driver context for: %s\n", Dmod_GetName(driver_node->driver));
             }
             cleanup_driver_module(Dmod_GetName(driver_node->driver), driver_node->was_loaded, driver_node->was_enabled);
             Dmod_Free(driver_node);
@@ -949,6 +953,8 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
     }
 
     dmlist_clear(ctx->drivers);
+
+    DMOD_LOG_INFO("Unconfigured all drivers\n");
 
     return DMFSI_OK;
 }
@@ -1033,6 +1039,8 @@ static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_
         }
         return NULL;
     }
+
+    DMOD_LOG_INFO("Prepared driver module: %s (was_loaded: %d, was_enabled: %d)\n", driver_name, *was_loaded, *was_enabled);
     return driver;
 }
 
