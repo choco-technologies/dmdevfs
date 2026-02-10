@@ -964,7 +964,21 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
  */
 static bool is_file(const char* path)
 {
-    return Dmod_Access(path, DMOD_F_OK) == 0;
+    // Check if path exists
+    if (Dmod_Access(path, DMOD_F_OK) != 0)
+    {
+        return false;
+    }
+    
+    // Try to open as directory - if it succeeds, it's a directory, not a file
+    void* dir_handle = Dmod_OpenDir(path);
+    if (dir_handle != NULL)
+    {
+        Dmod_CloseDir(dir_handle);
+        return false;  // It's a directory
+    }
+    
+    return true;  // It's a file
 }
 
 /**
