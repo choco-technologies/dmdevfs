@@ -647,7 +647,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
     bool file_should_be_listed = compare_paths_ignore_trailing_slash(dir_node->directory_path, parent_dir) == 0;
     if(file_should_be_listed)
     {
-        strncpy(entry->name, driver->path, sizeof(entry->name));
+        // Extract basename from the full path for the directory entry
+        read_base_name(driver->path, entry->name, sizeof(entry->name));
         
         dmdrvi_stat_t stat;
         int res = driver_stat(driver, driver->path, &stat);
@@ -662,7 +663,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
     }
     else 
     {
-        strncpy(entry->name, parent_dir, sizeof(entry->name));
+        // Extract basename from parent directory for subdirectory entries
+        read_base_name(parent_dir, entry->name, sizeof(entry->name));
         entry->size = 0;
         entry->attr = DMFSI_ATTR_DIRECTORY;
     }
