@@ -77,11 +77,13 @@ static int unconfigure_drivers(dmfsi_context_t ctx);
 static bool is_file(const char* path);
 static bool is_driver( const char* name);
 static void read_base_name(const char* path, char* base_name, size_t name_size);
+static void read_dir_name_from_path(const char* path, char* dir_name, size_t name_size);
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver);
 static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_loaded, bool* was_enabled);
 static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool was_enabled);
 static int read_driver_parent_directory( const driver_node_t* node, char* path_buffer, size_t buffer_size );
 static int read_driver_node_path( const driver_node_t* node, char* path_buffer, size_t buffer_size );
+static int compare_paths_ignore_trailing_slash( const char* path1, const char* path2 );
 static int compare_driver_directory( const void* data, const void* user_data );
 static int compare_driver_node_path( const void* data, const void* user_data );
 static int compare_driver(const void* data, const void* user_data );
@@ -643,10 +645,11 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
         return DMFSI_ERR_GENERAL;
     }
 
-    bool file_should_be_listed = strcmp(dir_node->directory_path, parent_dir) == 0;
+    bool file_should_be_listed = compare_paths_ignore_trailing_slash(dir_node->directory_path, parent_dir) == 0;
     if(file_should_be_listed)
     {
-        strncpy(entry->name, driver->path, sizeof(entry->name));
+        // Extract basename from the full path for the directory entry
+        read_base_name(driver->path, entry->name, sizeof(entry->name));
         
         dmdrvi_stat_t stat;
         int res = driver_stat(driver, driver->path, &stat);
@@ -661,7 +664,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
     }
     else 
     {
-        strncpy(entry->name, parent_dir, sizeof(entry->name));
+        // Extract directory name from parent path for subdirectory entries
+        // This handles paths like "dev/" -> "dev"
+        read_dir_name_from_path(parent_dir, entry->name, sizeof(entry->name));
         entry->size = 0;
         entry->attr = DMFSI_ATTR_DIRECTORY;
     }
@@ -1007,6 +1012,66 @@ static void read_base_name(const char* path, char* base_name, size_t name_size)
 }
 
 /**
+ * @brief Extract directory name from a path, handling trailing slashes
+ * @param path Path to extract directory name from (may have trailing slash)
+ * @param dir_name Output buffer for directory name
+ * @param name_size Size of output buffer
+ * 
+ * Examples:
+ * - "dev/" -> "dev"
+ * - "/dev/" -> "dev"
+ * - "dmspiflash0/" -> "dmspiflash0"
+ * - "/" -> "" (root has no name)
+ */
+static void read_dir_name_from_path(const char* path, char* dir_name, size_t name_size)
+{
+    if (path == NULL || dir_name == NULL || name_size == 0)
+    {
+        if (dir_name && name_size > 0)
+        {
+            dir_name[0] = '\0';
+        }
+        return;
+    }
+
+    // Find the length without trailing slashes
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/')
+    {
+        len--;
+    }
+
+    // Special case: if path is just "/", return empty
+    if (len == 1 && path[0] == '/')
+    {
+        dir_name[0] = '\0';
+        return;
+    }
+
+    // Find the last slash before the directory name
+    const char* last_slash = NULL;
+    for (size_t i = 0; i < len; i++)
+    {
+        if (path[i] == '/')
+        {
+            last_slash = &path[i];
+        }
+    }
+
+    // Extract the directory name
+    const char* name_start = (last_slash != NULL) ? last_slash + 1 : path;
+    size_t name_len = len - (name_start - path);
+    
+    // Use snprintf for safe copying with guaranteed null-termination
+    int written = Dmod_SnPrintf(dir_name, name_size, "%.*s", (int)name_len, name_start);
+    if (written < 0 || (size_t)written >= name_size)
+    {
+        // Truncated, but snprintf ensures null-termination
+        dir_name[name_size - 1] = '\0';
+    }
+}
+
+/**
  * @brief Read driver name from configuration file
  */
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver)
@@ -1169,7 +1234,65 @@ static int read_driver_node_path( const driver_node_t* node, char* path_buffer, 
 }
 
 /**
+ * @brief Compare two paths, ignoring trailing slashes
+ * @param path1 First path to compare
+ * @param path2 Second path to compare  
+ * @return 0 if equal, non-zero if different
+ * 
+ * Note: The root path "/" is treated specially and retains its slash.
+ * For example, "/" and "//" are considered equal, but "dir" and "dir/" are also equal.
+ */
+static int compare_paths_ignore_trailing_slash( const char* path1, const char* path2 )
+{
+    // Handle NULL pointers - both NULL is equal, one NULL is different
+    if (path1 == NULL && path2 == NULL)
+    {
+        return 0;
+    }
+    if (path1 == NULL || path2 == NULL)
+    {
+        return 1;
+    }
+
+    // Get lengths
+    size_t len1 = strlen(path1);
+    size_t len2 = strlen(path2);
+    
+    // Remove trailing slashes from both paths for comparison
+    // Keep at least "/" if that's the entire path (len > 1 ensures we keep root "/")
+    while (len1 > 1 && path1[len1 - 1] == '/')
+    {
+        len1--;
+    }
+    while (len2 > 1 && path2[len2 - 1] == '/')
+    {
+        len2--;
+    }
+    
+    // Lengths must match
+    if (len1 != len2)
+    {
+        return 1;
+    }
+    
+    // Content must match
+    return strncmp(path1, path2, len1);
+}
+
+/**
  * @brief Compare the path of a driver directory with a given path
+ * 
+ * This function compares the parent directory of a driver node with a given path.
+ * It's used by opendir/readdir to find all driver nodes that belong to a specific directory.
+ * 
+ * @param data Pointer to driver_node_t
+ * @param user_data Pointer to directory path string
+ * @return 0 if the node's parent matches the given path, non-zero otherwise
+ * 
+ * Example: When listing directory "dmspiflash0", this function finds all nodes
+ * whose parent directory is "dmspiflash0" (e.g., nodes with path "dmspiflash0/1").
+ * 
+ * Note: Trailing slashes are ignored in comparison, so "dmspiflash0" matches "dmspiflash0/".
  */
 static int compare_driver_directory( const void* data, const void* user_data )
 {
@@ -1180,23 +1303,16 @@ static int compare_driver_directory( const void* data, const void* user_data )
         return 0;
     }
 
-    char directory_path[MAX_PATH_LENGTH] = {0};
-    if(read_driver_parent_directory(node, directory_path, sizeof(directory_path)) != 0)
+    char parent_dir[MAX_PATH_LENGTH] = {0};
+    if(read_driver_parent_directory(node, parent_dir, sizeof(parent_dir)) != 0)
     {
         return -1;
     }
 
-    char* driver_path = directory_path;
-    while(*path)
-    {
-        if(*path != *driver_path)
-        {
-            return 1;
-        }
-        path++;
-        driver_path++;
-    }
-    return 0;
+    // Use helper function to compare paths, handling optional trailing slashes
+    // This ensures exact path matching (not prefix matching) which is critical
+    // to prevent "/" from incorrectly matching subdirectories like "dmspiflash0/"
+    return compare_paths_ignore_trailing_slash(path, parent_dir);
 }
 
 /**
