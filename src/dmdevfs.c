@@ -1061,9 +1061,14 @@ static void read_dir_name_from_path(const char* path, char* dir_name, size_t nam
     // Extract the directory name
     const char* name_start = (last_slash != NULL) ? last_slash + 1 : path;
     size_t name_len = len - (name_start - path);
-    size_t copy_len = (name_len < name_size - 1) ? name_len : name_size - 1;
-    strncpy(dir_name, name_start, copy_len);
-    dir_name[copy_len] = '\0';
+    
+    // Use snprintf for safe copying with guaranteed null-termination
+    int written = Dmod_SnPrintf(dir_name, name_size, "%.*s", (int)name_len, name_start);
+    if (written < 0 || (size_t)written >= name_size)
+    {
+        // Truncated, but snprintf ensures null-termination
+        dir_name[name_size - 1] = '\0';
+    }
 }
 
 /**
