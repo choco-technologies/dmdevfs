@@ -1180,23 +1180,35 @@ static int compare_driver_directory( const void* data, const void* user_data )
         return 0;
     }
 
-    char directory_path[MAX_PATH_LENGTH] = {0};
-    if(read_driver_parent_directory(node, directory_path, sizeof(directory_path)) != 0)
+    char parent_dir[MAX_PATH_LENGTH] = {0};
+    if(read_driver_parent_directory(node, parent_dir, sizeof(parent_dir)) != 0)
     {
         return -1;
     }
 
-    char* driver_path = directory_path;
-    while(*path)
+    // Compare paths, handling optional trailing slashes
+    // Get lengths
+    size_t path_len = strlen(path);
+    size_t parent_len = strlen(parent_dir);
+    
+    // Remove trailing slashes from both paths for comparison
+    while (path_len > 1 && path[path_len - 1] == '/')
     {
-        if(*path != *driver_path)
-        {
-            return 1;
-        }
-        path++;
-        driver_path++;
+        path_len--;
     }
-    return 0;
+    while (parent_len > 1 && parent_dir[parent_len - 1] == '/')
+    {
+        parent_len--;
+    }
+    
+    // Lengths must match
+    if (path_len != parent_len)
+    {
+        return 1;
+    }
+    
+    // Content must match
+    return strncmp(path, parent_dir, path_len);
 }
 
 /**
