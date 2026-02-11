@@ -1183,7 +1183,6 @@ static int read_driver_parent_directory( const driver_node_t* node, char* path_b
     memset(path_buffer, 0, buffer_size);
     return format_parent_directory_path(node, path_buffer, buffer_size);
 }
-}
 
 /**
  * @brief Read the path associated with a driver node
