@@ -77,6 +77,7 @@ static int unconfigure_drivers(dmfsi_context_t ctx);
 static bool is_file(const char* path);
 static bool is_driver( const char* name);
 static void read_base_name(const char* path, char* base_name, size_t name_size);
+static void read_dir_name_from_path(const char* path, char* dir_name, size_t name_size);
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver);
 static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_loaded, bool* was_enabled);
 static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool was_enabled);
@@ -663,8 +664,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
     }
     else 
     {
-        // Extract basename from parent directory for subdirectory entries
-        read_base_name(parent_dir, entry->name, sizeof(entry->name));
+        // Extract directory name from parent path for subdirectory entries
+        // This handles paths like "dev/" -> "dev"
+        read_dir_name_from_path(parent_dir, entry->name, sizeof(entry->name));
         entry->size = 0;
         entry->attr = DMFSI_ATTR_DIRECTORY;
     }
@@ -1007,6 +1009,61 @@ static void read_base_name(const char* path, char* base_name, size_t name_size)
     const char* name_start = (last_slash != NULL) ? last_slash + 1 : path;
     strncpy(base_name, name_start, name_size);
     base_name[name_size - 1] = '\0';
+}
+
+/**
+ * @brief Extract directory name from a path, handling trailing slashes
+ * @param path Path to extract directory name from (may have trailing slash)
+ * @param dir_name Output buffer for directory name
+ * @param name_size Size of output buffer
+ * 
+ * Examples:
+ * - "dev/" -> "dev"
+ * - "/dev/" -> "dev"
+ * - "dmspiflash0/" -> "dmspiflash0"
+ * - "/" -> "" (root has no name)
+ */
+static void read_dir_name_from_path(const char* path, char* dir_name, size_t name_size)
+{
+    if (path == NULL || dir_name == NULL || name_size == 0)
+    {
+        if (dir_name && name_size > 0)
+        {
+            dir_name[0] = '\0';
+        }
+        return;
+    }
+
+    // Find the length without trailing slashes
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/')
+    {
+        len--;
+    }
+
+    // Special case: if path is just "/", return empty
+    if (len == 1 && path[0] == '/')
+    {
+        dir_name[0] = '\0';
+        return;
+    }
+
+    // Find the last slash before the directory name
+    const char* last_slash = NULL;
+    for (size_t i = 0; i < len; i++)
+    {
+        if (path[i] == '/')
+        {
+            last_slash = &path[i];
+        }
+    }
+
+    // Extract the directory name
+    const char* name_start = (last_slash != NULL) ? last_slash + 1 : path;
+    size_t name_len = len - (name_start - path);
+    size_t copy_len = (name_len < name_size - 1) ? name_len : name_size - 1;
+    strncpy(dir_name, name_start, copy_len);
+    dir_name[copy_len] = '\0';
 }
 
 /**
