@@ -82,6 +82,7 @@ static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_
 static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool was_enabled);
 static int read_driver_parent_directory( const driver_node_t* node, char* path_buffer, size_t buffer_size );
 static int read_driver_node_path( const driver_node_t* node, char* path_buffer, size_t buffer_size );
+static int compare_paths_ignore_trailing_slash( const char* path1, const char* path2 );
 static int compare_driver_directory( const void* data, const void* user_data );
 static int compare_driver_node_path( const void* data, const void* user_data );
 static int compare_driver(const void* data, const void* user_data );
@@ -643,7 +644,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
         return DMFSI_ERR_GENERAL;
     }
 
-    bool file_should_be_listed = strcmp(dir_node->directory_path, parent_dir) == 0;
+    bool file_should_be_listed = compare_paths_ignore_trailing_slash(dir_node->directory_path, parent_dir) == 0;
     if(file_should_be_listed)
     {
         strncpy(entry->name, driver->path, sizeof(entry->name));
@@ -1169,6 +1170,42 @@ static int read_driver_node_path( const driver_node_t* node, char* path_buffer, 
 }
 
 /**
+ * @brief Compare two paths, ignoring trailing slashes
+ * @return 0 if equal, non-zero if different
+ */
+static int compare_paths_ignore_trailing_slash( const char* path1, const char* path2 )
+{
+    if (path1 == NULL || path2 == NULL)
+    {
+        return (path1 == path2) ? 0 : 1;
+    }
+
+    // Get lengths
+    size_t len1 = strlen(path1);
+    size_t len2 = strlen(path2);
+    
+    // Remove trailing slashes from both paths for comparison
+    // Keep at least "/" if that's the entire path
+    while (len1 > 1 && path1[len1 - 1] == '/')
+    {
+        len1--;
+    }
+    while (len2 > 1 && path2[len2 - 1] == '/')
+    {
+        len2--;
+    }
+    
+    // Lengths must match
+    if (len1 != len2)
+    {
+        return 1;
+    }
+    
+    // Content must match
+    return strncmp(path1, path2, len1);
+}
+
+/**
  * @brief Compare the path of a driver directory with a given path
  */
 static int compare_driver_directory( const void* data, const void* user_data )
@@ -1186,29 +1223,8 @@ static int compare_driver_directory( const void* data, const void* user_data )
         return -1;
     }
 
-    // Compare paths, handling optional trailing slashes
-    // Get lengths
-    size_t path_len = strlen(path);
-    size_t parent_len = strlen(parent_dir);
-    
-    // Remove trailing slashes from both paths for comparison
-    while (path_len > 1 && path[path_len - 1] == '/')
-    {
-        path_len--;
-    }
-    while (parent_len > 1 && parent_dir[parent_len - 1] == '/')
-    {
-        parent_len--;
-    }
-    
-    // Lengths must match
-    if (path_len != parent_len)
-    {
-        return 1;
-    }
-    
-    // Content must match
-    return strncmp(path, parent_dir, path_len);
+    // Use helper function to compare paths, handling optional trailing slashes
+    return compare_paths_ignore_trailing_slash(path, parent_dir);
 }
 
 /**
