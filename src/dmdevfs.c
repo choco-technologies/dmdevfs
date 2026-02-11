@@ -80,6 +80,11 @@ static void read_base_name(const char* path, char* base_name, size_t name_size);
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver);
 static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_loaded, bool* was_enabled);
 static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool was_enabled);
+static bool has_major_number(const driver_node_t* node);
+static bool has_minor_number(const driver_node_t* node);
+static bool has_both_device_numbers(const driver_node_t* node);
+static int format_parent_directory_path(const driver_node_t* node, char* path_buffer, size_t buffer_size);
+static int format_node_name(const driver_node_t* node, char* name_buffer, size_t buffer_size);
 static int read_driver_parent_directory( const driver_node_t* node, char* path_buffer, size_t buffer_size );
 static int read_driver_node_path( const driver_node_t* node, char* path_buffer, size_t buffer_size );
 static int compare_driver_directory( const void* data, const void* user_data );
@@ -1088,6 +1093,84 @@ static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool
 }
 
 /**
+ * @brief Check if a driver node has a major device number
+ */
+static bool has_major_number(const driver_node_t* node)
+{
+    return node != NULL && (node->dev_num.flags & DMDRVI_NUM_MAJOR) != 0;
+}
+
+/**
+ * @brief Check if a driver node has a minor device number
+ */
+static bool has_minor_number(const driver_node_t* node)
+{
+    return node != NULL && (node->dev_num.flags & DMDRVI_NUM_MINOR) != 0;
+}
+
+/**
+ * @brief Check if a driver node has both major and minor device numbers
+ */
+static bool has_both_device_numbers(const driver_node_t* node)
+{
+    return has_major_number(node) && has_minor_number(node);
+}
+
+/**
+ * @brief Format the parent directory path for a driver node
+ */
+static int format_parent_directory_path(const driver_node_t* node, char* path_buffer, size_t buffer_size)
+{
+    const char* driver_name = Dmod_GetName(node->driver);
+    if (driver_name == NULL)
+    {
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    if (has_both_device_numbers(node))
+    {
+        Dmod_SnPrintf(path_buffer, buffer_size, "%s%u/", driver_name, node->dev_num.major);
+    }
+    else if (has_minor_number(node) && !has_major_number(node))
+    {
+        Dmod_SnPrintf(path_buffer, buffer_size, "%sx/", driver_name);
+    }
+    else
+    {
+        strncpy(path_buffer, ROOT_DIRECTORY_NAME, buffer_size);
+    }
+    
+    return DMFSI_OK;
+}
+
+/**
+ * @brief Format the node name portion of the path
+ */
+static int format_node_name(const driver_node_t* node, char* name_buffer, size_t buffer_size)
+{
+    const char* driver_name = Dmod_GetName(node->driver);
+    if (driver_name == NULL)
+    {
+        return DMFSI_ERR_NOT_FOUND;
+    }
+    
+    if (has_minor_number(node))
+    {
+        Dmod_SnPrintf(name_buffer, buffer_size, "%u", node->dev_num.minor);
+    }
+    else if (has_major_number(node))
+    {
+        Dmod_SnPrintf(name_buffer, buffer_size, "%s%u", driver_name, node->dev_num.major);
+    }
+    else
+    {
+        strncpy(name_buffer, driver_name, buffer_size);
+    }
+    
+    return DMFSI_OK;
+}
+
+/**
  * @brief Read the path associated with a driver directory
  */
 static int read_driver_parent_directory( const driver_node_t* node, char* path_buffer, size_t buffer_size )
@@ -1098,26 +1181,8 @@ static int read_driver_parent_directory( const driver_node_t* node, char* path_b
     }
 
     memset(path_buffer, 0, buffer_size);
-    const char* driver_name = Dmod_GetName( node->driver );
-    if(driver_name == NULL)
-    {
-        return DMFSI_ERR_NOT_FOUND;
-    }
-    bool major_given = (node->dev_num.flags & DMDRVI_NUM_MAJOR) != 0;
-    bool minor_given = (node->dev_num.flags & DMDRVI_NUM_MINOR) != 0;
-    if(major_given && minor_given)
-    {
-        Dmod_SnPrintf(path_buffer, buffer_size, "%s%u/", driver_name, node->dev_num.major);
-    }
-    else if(minor_given)
-    {
-        Dmod_SnPrintf(path_buffer, buffer_size, "%sx/", driver_name);
-    }
-    else 
-    {
-        strncpy(path_buffer, ROOT_DIRECTORY_NAME, buffer_size);
-    }
-    return DMFSI_OK;
+    return format_parent_directory_path(node, path_buffer, buffer_size);
+}
 }
 
 /**
@@ -1135,37 +1200,19 @@ static int read_driver_node_path( const driver_node_t* node, char* path_buffer, 
     {
         return DMFSI_ERR_GENERAL;
     }
-    bool major_given = (node->dev_num.flags & DMDRVI_NUM_MAJOR) != 0;
-    bool minor_given = (node->dev_num.flags & DMDRVI_NUM_MINOR) != 0;
+    
     size_t current_length = strlen(path_buffer);
     if(current_length >= buffer_size)
     {
         DMOD_LOG_ERROR("Buffer too small for driver path\n");
         return DMFSI_ERR_NO_SPACE;
     }
-    path_buffer += current_length;
-    buffer_size -= current_length;
-    if(minor_given)
-    {
-        Dmod_SnPrintf(path_buffer, buffer_size, "%u", node->dev_num.minor);
-    }
-    else 
-    {
-        const char* driver_name = Dmod_GetName( node->driver );
-        if(driver_name == NULL)
-        {
-            return DMFSI_ERR_NOT_FOUND;
-        }
-        if(major_given)
-        {
-            Dmod_SnPrintf(path_buffer, buffer_size, "%s%u", driver_name, node->dev_num.major);
-        }
-        else 
-        {
-            strncpy(path_buffer, driver_name, buffer_size);
-        }
-    }
-    return DMFSI_OK;
+    
+    char* name_position = path_buffer + current_length;
+    size_t remaining_size = buffer_size - current_length;
+    
+    return format_node_name(node, name_position, remaining_size);
+}
 }
 
 /**
