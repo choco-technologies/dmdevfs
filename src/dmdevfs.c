@@ -844,7 +844,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
                 DMOD_LOG_ERROR("Failed to configure driver: %s\n", module_name);
                 continue;
             }
-            if(dmlist_push_back(ctx->drivers, driver_node) != 0)
+            if(!dmlist_push_back(ctx->drivers, driver_node))
             {
                 DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
                 Dmod_Free(driver_node);
