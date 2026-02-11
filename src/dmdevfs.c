@@ -1171,13 +1171,23 @@ static int read_driver_node_path( const driver_node_t* node, char* path_buffer, 
 
 /**
  * @brief Compare two paths, ignoring trailing slashes
+ * @param path1 First path to compare
+ * @param path2 Second path to compare  
  * @return 0 if equal, non-zero if different
+ * 
+ * Note: The root path "/" is treated specially and retains its slash.
+ * For example, "/" and "//" are considered equal, but "dir" and "dir/" are also equal.
  */
 static int compare_paths_ignore_trailing_slash( const char* path1, const char* path2 )
 {
+    // Handle NULL pointers - both NULL is equal, one NULL is different
+    if (path1 == NULL && path2 == NULL)
+    {
+        return 0;
+    }
     if (path1 == NULL || path2 == NULL)
     {
-        return (path1 == path2) ? 0 : 1;
+        return 1;
     }
 
     // Get lengths
@@ -1185,7 +1195,7 @@ static int compare_paths_ignore_trailing_slash( const char* path1, const char* p
     size_t len2 = strlen(path2);
     
     // Remove trailing slashes from both paths for comparison
-    // Keep at least "/" if that's the entire path
+    // Keep at least "/" if that's the entire path (len > 1 ensures we keep root "/")
     while (len1 > 1 && path1[len1 - 1] == '/')
     {
         len1--;
@@ -1207,6 +1217,18 @@ static int compare_paths_ignore_trailing_slash( const char* path1, const char* p
 
 /**
  * @brief Compare the path of a driver directory with a given path
+ * 
+ * This function compares the parent directory of a driver node with a given path.
+ * It's used by opendir/readdir to find all driver nodes that belong to a specific directory.
+ * 
+ * @param data Pointer to driver_node_t
+ * @param user_data Pointer to directory path string
+ * @return 0 if the node's parent matches the given path, non-zero otherwise
+ * 
+ * Example: When listing directory "dmspiflash0", this function finds all nodes
+ * whose parent directory is "dmspiflash0" (e.g., nodes with path "dmspiflash0/1").
+ * 
+ * Note: Trailing slashes are ignored in comparison, so "dmspiflash0" matches "dmspiflash0/".
  */
 static int compare_driver_directory( const void* data, const void* user_data )
 {
@@ -1224,6 +1246,8 @@ static int compare_driver_directory( const void* data, const void* user_data )
     }
 
     // Use helper function to compare paths, handling optional trailing slashes
+    // This ensures exact path matching (not prefix matching) which is critical
+    // to prevent "/" from incorrectly matching subdirectories like "dmspiflash0/"
     return compare_paths_ignore_trailing_slash(path, parent_dir);
 }
 
