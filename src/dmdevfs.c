@@ -601,6 +601,15 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
     
     if (!is_directory(ctx, path))
     {
+        // Check if the path is a file (device node)
+        driver_node_t* driver_node = find_driver_node(ctx, path);
+        if (driver_node != NULL)
+        {
+            // Path exists but is a file, not a directory
+            DMOD_LOG_ERROR("Not a directory: %s\n", path);
+            return DMFSI_ERR_NOT_FOUND;
+        }
+        // Path doesn't exist at all
         DMOD_LOG_ERROR("Directory not found: %s\n", path);
         return DMFSI_ERR_NOT_FOUND;
     }
