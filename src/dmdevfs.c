@@ -75,7 +75,7 @@ struct dmfsi_context
 // ============================================================================
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path);
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx);
-static void configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx, const char* config_path);
+static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx, const char* config_path);
 static int unconfigure_drivers(dmfsi_context_t ctx);
 static bool is_file(const char* path);
 static bool is_driver( const char* name);
@@ -854,20 +854,26 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
                 continue;
             }
 
-            driver_node_t* driver_node = configure_driver(module_name, config_ctx);
-            if (driver_node != NULL)
+            // Section-specific driver_name entries take priority over the file/directory
+            // derived driver name. Only configure the main driver when no section-level
+            // drivers are present in the file.
+            int section_drivers_added = configure_section_drivers(ctx, config_ctx, full_path);
+            if (section_drivers_added == 0)
             {
-                if(!dmlist_push_back(ctx->drivers, driver_node))
+                driver_node_t* driver_node = configure_driver(module_name, config_ctx);
+                if (driver_node != NULL)
                 {
-                    DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
-                    Dmod_Free(driver_node);
+                    if(!dmlist_push_back(ctx->drivers, driver_node))
+                    {
+                        DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
+                        Dmod_Free(driver_node);
+                    }
+                }
+                else
+                {
+                    DMOD_LOG_ERROR("Failed to configure driver: %s\n", module_name);
                 }
             }
-            else
-            {
-                DMOD_LOG_ERROR("Failed to configure driver: %s\n", module_name);
-            }
-            configure_section_drivers(ctx, config_ctx, full_path);
             dmini_destroy(config_ctx);
         }
         else 
@@ -956,16 +962,21 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
  * other than "main" that contains a driver_name key, a new driver is configured
  * with the INI context restricted to that section via dmini_set_active_section,
  * so the driver only sees the keys belonging to its own section.
+ *
+ * Returns the number of section-specific drivers that were successfully added.
+ * A non-zero return value signals to the caller that the file is a multi-driver
+ * config and no fallback main driver should be configured.
  */
-static void configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx, const char* config_path)
+static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx, const char* config_path)
 {
     void* file = Dmod_FileOpen(config_path, "r");
     if (file == NULL)
     {
         DMOD_LOG_ERROR("Failed to open config file for section scan: %s\n", config_path);
-        return;
+        return 0;
     }
 
+    int num_added = 0;
     char line[INI_LINE_BUFFER_SIZE];
     while (Dmod_FileReadLine(line, sizeof(line), file) != NULL)
     {
@@ -1024,9 +1035,14 @@ static void configure_section_drivers(dmfsi_context_t ctx, dmini_context_t confi
             DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
             Dmod_Free(driver_node);
         }
+        else
+        {
+            num_added++;
+        }
     }
 
     Dmod_FileClose(file);
+    return num_added;
 }
 
 /**
