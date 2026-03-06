@@ -904,6 +904,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     DMOD_LOG_STEP_BEGIN("Configuring driver: %s\n", driver_name);
     bool was_loaded = false;
     bool was_enabled = false;
+    DMOD_LOG_STEP_PROGRESS(25, "Loading driver module: %s\n", driver_name);
     Dmod_Context_t* driver = prepare_driver_module(driver_name, &was_loaded, &was_enabled);
     if (driver == NULL)
     {
@@ -911,6 +912,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         return NULL;
     }
 
+    DMOD_LOG_STEP_PROGRESS(50, "Resolving driver interface: %s\n", driver_name);
     dmod_dmdrvi_create_t dmdrvi_create = Dmod_GetDifFunction(driver, dmod_dmdrvi_create_sig);
     if (dmdrvi_create == NULL)
     {
@@ -929,6 +931,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         return NULL;
     }
 
+    DMOD_LOG_STEP_PROGRESS(75, "Creating driver context: %s\n", driver_name);
     driver_node->was_loaded = was_loaded;
     driver_node->was_enabled = was_enabled;
     driver_node->driver = driver;
@@ -941,6 +944,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
+    DMOD_LOG_STEP_PROGRESS(90, "Reading driver node path: %s\n", driver_name);
     if(read_driver_node_path( driver_node, driver_node->path, sizeof(driver_node->path) ) != 0)
     {
         DMOD_LOG_ERROR("Failed to read driver node path: %s\n", driver_name);
