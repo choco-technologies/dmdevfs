@@ -901,12 +901,13 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
  */
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx)
 {
-    DMOD_LOG_VERBOSE("Configuring driver: %s\n", driver_name);
+    DMOD_LOG_STEP_BEGIN("Configuring driver: %s\n", driver_name);
     bool was_loaded = false;
     bool was_enabled = false;
     Dmod_Context_t* driver = prepare_driver_module(driver_name, &was_loaded, &was_enabled);
     if (driver == NULL)
     {
+        DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
 
@@ -915,6 +916,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     {
         DMOD_LOG_ERROR("Driver module does not implement dmdrvi_create: %s\n", driver_name);
         cleanup_driver_module(driver_name, was_loaded, was_enabled);
+        DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
 
@@ -923,6 +925,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     {
         DMOD_LOG_ERROR("Failed to allocate memory for driver node: %s\n", driver_name);
         cleanup_driver_module(driver_name, was_loaded, was_enabled);
+        DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
 
@@ -935,6 +938,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         DMOD_LOG_ERROR("Failed to create driver context: %s\n", driver_name);
         cleanup_driver_module(driver_name, was_loaded, was_enabled);
         Dmod_Free(driver_node);
+        DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
     if(read_driver_node_path( driver_node, driver_node->path, sizeof(driver_node->path) ) != 0)
@@ -947,10 +951,11 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         }
         cleanup_driver_module(driver_name, was_loaded, was_enabled);
         Dmod_Free(driver_node);
+        DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
 
-    DMOD_LOG_INFO("Configured driver: %s (path: %s)\n", driver_name, driver_node->path);
+    DMOD_LOG_STEP(0, "Configured driver: %s (path: %s)\n", driver_name, driver_node->path);
 
     return driver_node;
 }
