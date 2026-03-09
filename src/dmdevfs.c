@@ -23,7 +23,6 @@
 #define DMDEVFS_CONTEXT_MAGIC 0x444D4456  // 'DMDV'
 #define ROOT_DIRECTORY_NAME "/"
 #define MAX_PATH_LENGTH     (DMOD_MAX_MODULE_NAME_LENGTH + 20)
-#define INI_LINE_BUFFER_SIZE 256
 #define INI_MAIN_SECTION "main"
 
 /**
@@ -75,7 +74,7 @@ struct dmfsi_context
 // ============================================================================
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path);
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx);
-static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx, const char* config_path);
+static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx);
 static int unconfigure_drivers(dmfsi_context_t ctx);
 static bool is_file(const char* path);
 static bool is_driver( const char* name);
@@ -857,7 +856,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             // Section-specific driver_name entries take priority over the file/directory
             // derived driver name. Only configure the main driver when no section-level
             // drivers are present in the file.
-            int section_drivers_added = configure_section_drivers(ctx, config_ctx, full_path);
+            int section_drivers_added = configure_section_drivers(ctx, config_ctx);
             if (section_drivers_added == 0)
             {
                 driver_node_t* driver_node = configure_driver(module_name, config_ctx);
@@ -967,90 +966,112 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
 /**
  * @brief Configure drivers for non-main sections that contain a driver_name key
  *
- * Scans the config file line by line for INI section headers. For each section
- * other than "main" that contains a driver_name key, a new driver is configured
- * with the INI context restricted to that section via dmini_set_active_section,
- * so the driver only sees the keys belonging to its own section.
+ * Uses dmini_generate_string to obtain the full INI content from the
+ * already-parsed context (avoiding a second read of the config file from
+ * disk).  Each non-main section that contains a driver_name key is configured
+ * as a separate driver with the INI context restricted to that section via
+ * dmini_set_active_section, so the driver only sees the keys belonging to its
+ * own section.
  *
  * Returns the number of section-specific drivers that were successfully added.
  * A non-zero return value signals to the caller that the file is a multi-driver
  * config and no fallback main driver should be configured.
  */
-static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx, const char* config_path)
+static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx)
 {
-    void* file = Dmod_FileOpen(config_path, "r");
-    if (file == NULL)
+    // Generate the full INI content from the already-parsed dmini context.
+    // This avoids re-reading the file from disk; we work entirely with the
+    // in-memory representation that dmini built during dmini_parse_file.
+    int content_size = dmini_generate_string(config_ctx, NULL, 0);
+    if (content_size <= 0)
     {
-        DMOD_LOG_ERROR("Failed to open config file for section scan: %s\n", config_path);
+        return 0;
+    }
+
+    char* ini_content = (char*)Dmod_Malloc((size_t)content_size);
+    if (ini_content == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate buffer for INI content scan\n");
+        return 0;
+    }
+
+    if (dmini_generate_string(config_ctx, ini_content, (size_t)content_size) <= 0)
+    {
+        Dmod_Free(ini_content);
         return 0;
     }
 
     int num_added = 0;
-    char line[INI_LINE_BUFFER_SIZE];
-    while (Dmod_FileReadLine(line, sizeof(line), file) != NULL)
+    const char* p = ini_content;
+    while (*p != '\0')
     {
-        // Skip lines that don't start with '[' (ignore leading whitespace)
-        char* p = line;
+        // Skip leading whitespace on the line
         while (*p == ' ' || *p == '\t') p++;
-        if (*p != '[') continue;
 
-        // Find closing bracket
-        char* end = strchr(p, ']');
-        if (end == NULL || end <= p) continue;
-
-        // Extract section name
-        size_t name_len = (size_t)(end - p - 1);
-        if (name_len == 0 || name_len >= DMOD_MAX_MODULE_NAME_LENGTH) continue;
-
-        char section_name[DMOD_MAX_MODULE_NAME_LENGTH];
-        strncpy(section_name, p + 1, name_len);
-        section_name[name_len] = '\0';
-
-        // Trim trailing whitespace from section name
-        size_t slen = strlen(section_name);
-        while (slen > 0 && (section_name[slen - 1] == ' ' || section_name[slen - 1] == '\t'))
+        if (*p == '[')
         {
-            slen--;
+            // Extract section name between '[' and ']'
+            const char* name_start = p + 1;
+            const char* name_end = name_start;
+            while (*name_end != '\0' && *name_end != ']' && *name_end != '\n') name_end++;
+
+            if (*name_end == ']')
+            {
+                // Trim leading whitespace inside the brackets
+                while (name_start < name_end && (*name_start == ' ' || *name_start == '\t')) name_start++;
+                // Trim trailing whitespace inside the brackets
+                while (name_end > name_start && (*(name_end - 1) == ' ' || *(name_end - 1) == '\t')) name_end--;
+
+                size_t name_len = (size_t)(name_end - name_start);
+                if (name_len > 0 && name_len < DMOD_MAX_MODULE_NAME_LENGTH)
+                {
+                    char section_name[DMOD_MAX_MODULE_NAME_LENGTH];
+                    strncpy(section_name, name_start, name_len);
+                    section_name[name_len] = '\0';
+
+                    // Skip the [main] section; it is handled by existing logic
+                    if (strcmp(section_name, INI_MAIN_SECTION) != 0 &&
+                        dmini_has_key(config_ctx, section_name, "driver_name"))
+                    {
+                        const char* drv_name = dmini_get_string(config_ctx, section_name, "driver_name", NULL);
+                        if (drv_name != NULL)
+                        {
+                            char module_name[DMOD_MAX_MODULE_NAME_LENGTH];
+                            strncpy(module_name, drv_name, sizeof(module_name));
+                            module_name[sizeof(module_name) - 1] = '\0';
+
+                            // Restrict the INI context to this section and configure the driver.
+                            // Token 0 means no owner-token protection (context was created with dmini_create).
+                            dmini_set_active_section(config_ctx, section_name, 0);
+                            driver_node_t* driver_node = configure_driver(module_name, config_ctx);
+                            dmini_clear_active_section(config_ctx, 0);
+
+                            if (driver_node == NULL)
+                            {
+                                DMOD_LOG_ERROR("Failed to configure driver for section [%s]: %s\n",
+                                               section_name, module_name);
+                            }
+                            else if (!dmlist_push_back(ctx->drivers, driver_node))
+                            {
+                                DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
+                                Dmod_Free(driver_node);
+                            }
+                            else
+                            {
+                                num_added++;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        section_name[slen] = '\0';
 
-        // Skip empty section names and the "main" section (handled by existing logic)
-        if (slen == 0 || strcmp(section_name, INI_MAIN_SECTION) == 0) continue;
-
-        // Check if this section has a driver_name key
-        if (!dmini_has_key(config_ctx, section_name, "driver_name")) continue;
-
-        const char* drv_name = dmini_get_string(config_ctx, section_name, "driver_name", NULL);
-        if (drv_name == NULL) continue;
-
-        char module_name[DMOD_MAX_MODULE_NAME_LENGTH];
-        strncpy(module_name, drv_name, sizeof(module_name));
-        module_name[sizeof(module_name) - 1] = '\0';
-
-        // Restrict the INI context to this section and configure the driver.
-        // Token 0 means no owner-token protection (context was created with dmini_create).
-        dmini_set_active_section(config_ctx, section_name, 0);
-        driver_node_t* driver_node = configure_driver(module_name, config_ctx);
-        dmini_clear_active_section(config_ctx, 0);
-
-        if (driver_node == NULL)
-        {
-            DMOD_LOG_ERROR("Failed to configure driver for section [%s]: %s\n", section_name, module_name);
-            continue;
-        }
-
-        if (!dmlist_push_back(ctx->drivers, driver_node))
-        {
-            DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
-            Dmod_Free(driver_node);
-        }
-        else
-        {
-            num_added++;
-        }
+        // Advance to the next line
+        while (*p != '\0' && *p != '\n') p++;
+        if (*p == '\n') p++;
     }
 
-    Dmod_FileClose(file);
+    Dmod_Free(ini_content);
     return num_added;
 }
 
