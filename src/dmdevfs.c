@@ -80,6 +80,7 @@ static bool is_file(const char* path);
 static bool is_driver( const char* name);
 static void read_base_name(const char* path, char* base_name, size_t name_size);
 static void read_dir_name_from_path(const char* path, char* dir_name, size_t name_size);
+static void read_next_subdir_name(const char* base_path, const char* full_path, char* dir_name, size_t name_size);
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver);
 static Dmod_Context_t* prepare_driver_module(const char* driver_name, bool* was_loaded, bool* was_enabled);
 static void cleanup_driver_module(const char* driver_name, bool was_loaded, bool was_enabled);
@@ -675,9 +676,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
     }
     else 
     {
-        // Extract directory name from parent path for subdirectory entries
-        // This handles paths like "dev/" -> "dev"
-        read_dir_name_from_path(parent_dir, entry->name, sizeof(entry->name));
+        // Extract the immediate subdirectory name relative to the listing directory.
+        // E.g. listing "/" with a driver whose parent is "dmgpio8/" yields "dmgpio8".
+        read_next_subdir_name(dir_node->directory_path, parent_dir, entry->name, sizeof(entry->name));
         entry->size = 0;
         entry->attr = DMFSI_ATTR_DIRECTORY;
     }
@@ -1159,6 +1160,73 @@ static void read_dir_name_from_path(const char* path, char* dir_name, size_t nam
 }
 
 /**
+ * @brief Extract the first path component of full_path that comes after base_path
+ * @param base_path The directory currently being listed (e.g., "/" or "foo/")
+ * @param full_path The driver's parent directory path (e.g., "foo/bar/")
+ * @param dir_name  Output buffer for the immediate subdirectory name
+ * @param name_size Size of the output buffer
+ *
+ * Examples:
+ * - base="/",      full="dmgpio8/"   -> "dmgpio8"
+ * - base="/",      full="a/b/c/"     -> "a"
+ * - base="a/",     full="a/b/c/"     -> "b"
+ * - base="a/b/",   full="a/b/c/"     -> "c"
+ */
+static void read_next_subdir_name(const char* base_path, const char* full_path, char* dir_name, size_t name_size)
+{
+    if (base_path == NULL || full_path == NULL || dir_name == NULL || name_size == 0)
+    {
+        if (dir_name && name_size > 0)
+        {
+            dir_name[0] = '\0';
+        }
+        return;
+    }
+
+    // Compute effective length of base_path without trailing slashes
+    size_t base_len = strlen(base_path);
+    while (base_len > 1 && base_path[base_len - 1] == '/')
+    {
+        base_len--;
+    }
+
+    const char* start;
+    if (base_len == 1 && base_path[0] == '/')
+    {
+        // Base is the root directory; full_path has no leading slash
+        start = full_path;
+    }
+    else
+    {
+        // Skip past the base_path prefix and the separator '/'
+        if (strncmp(full_path, base_path, base_len) == 0 && full_path[base_len] == '/')
+        {
+            start = full_path + base_len + 1;
+        }
+        else
+        {
+            // Fallback: return the first component of full_path
+            start = full_path;
+        }
+    }
+
+    // Copy up to the next '/' (or end of string)
+    const char* end = start;
+    while (*end != '\0' && *end != '/')
+    {
+        end++;
+    }
+
+    size_t len = (size_t)(end - start);
+    if (len >= name_size)
+    {
+        len = name_size - 1;
+    }
+    strncpy(dir_name, start, len);
+    dir_name[len] = '\0';
+}
+
+/**
  * @brief Read driver name from configuration file
  */
 static dmini_context_t read_driver_for_config(const char* config_path, char* driver_name, size_t name_size, const char* default_driver)
@@ -1369,17 +1437,20 @@ static int compare_paths_ignore_trailing_slash( const char* path1, const char* p
 /**
  * @brief Compare the path of a driver directory with a given path
  * 
- * This function compares the parent directory of a driver node with a given path.
- * It's used by opendir/readdir to find all driver nodes that belong to a specific directory.
+ * This function checks whether a driver node is reachable from the given path,
+ * either directly (its parent directory exactly matches path) or indirectly
+ * (its parent directory is a subdirectory of path).
  * 
  * @param data Pointer to driver_node_t
  * @param user_data Pointer to directory path string
- * @return 0 if the node's parent matches the given path, non-zero otherwise
+ * @return 0 if the node is reachable from the given path, non-zero otherwise
  * 
- * Example: When listing directory "dmspiflash0", this function finds all nodes
- * whose parent directory is "dmspiflash0" (e.g., nodes with path "dmspiflash0/1").
+ * Example: When listing directory "/", this function returns 0 for any driver
+ * node, including those with parent "dmspiflash0/" or deeper paths.
+ * When listing "dmspiflash0", it returns 0 for nodes whose parent starts with
+ * "dmspiflash0/", enabling both direct files and nested subdirectories.
  * 
- * Note: Trailing slashes are ignored in comparison, so "dmspiflash0" matches "dmspiflash0/".
+ * Note: Trailing slashes are ignored in comparison.
  */
 static int compare_driver_directory( const void* data, const void* user_data )
 {
@@ -1396,10 +1467,33 @@ static int compare_driver_directory( const void* data, const void* user_data )
         return -1;
     }
 
-    // Use helper function to compare paths, handling optional trailing slashes
-    // This ensures exact path matching (not prefix matching) which is critical
-    // to prevent "/" from incorrectly matching subdirectories like "dmspiflash0/"
-    return compare_paths_ignore_trailing_slash(path, parent_dir);
+    // Check for exact match (driver is directly in this directory)
+    if (compare_paths_ignore_trailing_slash(path, parent_dir) == 0)
+    {
+        return 0;
+    }
+
+    // Check if the driver is in a subdirectory of path.
+    // Determine the effective length of path without trailing slashes.
+    size_t path_len = strlen(path);
+    while (path_len > 1 && path[path_len - 1] == '/')
+    {
+        path_len--;
+    }
+
+    // Root directory "/" is an ancestor of every path
+    if (path_len == 1 && path[0] == '/')
+    {
+        return 0;
+    }
+
+    // parent_dir must start with path followed by '/' to be a subdirectory
+    if (strncmp(parent_dir, path, path_len) == 0 && parent_dir[path_len] == '/')
+    {
+        return 0;
+    }
+
+    return 1;
 }
 
 /**
