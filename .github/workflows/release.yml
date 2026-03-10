@@ -3,6 +3,9 @@ name: Release
 on:
   release:
     types: [created]
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   discover-architectures:
@@ -59,7 +62,7 @@ jobs:
         id: get_version
         run: |
           # Extract version from tag (e.g., v1.2 -> 1.2)
-          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${{ github.event.release.tag_name || github.ref_name }}"
           VERSION="${VERSION#v}"  # Remove 'v' prefix if present
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Extracted version: $VERSION"
@@ -112,7 +115,7 @@ jobs:
       - name: Create release archive
         run: |
           cd release_package
-          zip -r ../dmdevfs-${{ github.event.release.tag_name }}-$ARCH_DIR_NAME.zip .
+          zip -r ../dmdevfs-${{ github.event.release.tag_name || github.ref_name }}-$ARCH_DIR_NAME.zip .
           cd ..
           echo "Created archive:"
           ls -lh dmdevfs-*.zip
@@ -121,7 +124,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: dmdevfs-${{ github.event.release.tag_name }}-*.zip
+          path: dmdevfs-${{ github.event.release.tag_name || github.ref_name }}-*.zip
           retention-days: 1
 
   generate-versions-manifest:
@@ -152,7 +155,7 @@ jobs:
 
           if [ -z "$VERSIONS" ]; then
             echo "Warning: No version tags found"
-            VERSIONS="${{ github.event.release.tag_name }}"
+            VERSIONS="${{ github.event.release.tag_name || github.ref_name }}"
             VERSIONS="${VERSIONS#v}"
           fi
           
@@ -189,6 +192,22 @@ jobs:
           echo "Downloaded artifacts:"
           ls -lR artifacts/
       
+      - name: Create GitHub Release if triggered by tag push
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          if ! gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "No release found for tag $TAG, creating one..."
+            gh release create "$TAG" \
+              --repo ${{ github.repository }} \
+              --title "Release $TAG" \
+              --notes "Release $TAG"
+          else
+            echo "Release for tag $TAG already exists, skipping creation."
+          fi
+
       - name: Upload release assets to versioned tag
         shell: bash
         env:
@@ -205,8 +224,8 @@ jobs:
           fi
           
           for zip_file in "${zip_files[@]}"; do
-            echo "Uploading $zip_file to ${{ github.event.release.tag_name }}..."
-            gh release upload ${{ github.event.release.tag_name }} \
+            echo "Uploading $zip_file to ${{ github.event.release.tag_name || github.ref_name }}..."
+            gh release upload ${{ github.event.release.tag_name || github.ref_name }} \
               "$zip_file" \
               --repo ${{ github.repository }} \
               --clobber
@@ -214,14 +233,14 @@ jobs:
           
           # Upload versions.dmm to the versioned release
           if [ -f artifacts/versions-manifest/versions.dmm ]; then
-            echo "Uploading versions.dmm to ${{ github.event.release.tag_name }}..."
-            gh release upload ${{ github.event.release.tag_name }} \
+            echo "Uploading versions.dmm to ${{ github.event.release.tag_name || github.ref_name }}..."
+            gh release upload ${{ github.event.release.tag_name || github.ref_name }} \
               artifacts/versions-manifest/versions.dmm \
               --repo ${{ github.repository }} \
               --clobber
           fi
           
-          echo "Successfully uploaded ${#zip_files[@]} artifact(s) to ${{ github.event.release.tag_name }}"
+          echo "Successfully uploaded ${#zip_files[@]} artifact(s) to ${{ github.event.release.tag_name || github.ref_name }}"
       
       - name: Create or update latest release
         shell: bash
@@ -240,8 +259,8 @@ jobs:
           echo "Creating vlatest release..."
           gh release create vlatest \
             --repo ${{ github.repository }} \
-            --title "Latest Release (based on ${{ github.event.release.tag_name }})" \
-            --notes "This release always points to the latest stable version. Currently based on ${{ github.event.release.tag_name }}."
+            --title "Latest Release (based on ${{ github.event.release.tag_name || github.ref_name }})" \
+            --notes "This release always points to the latest stable version. Currently based on ${{ github.event.release.tag_name || github.ref_name }}."
       
       - name: Upload release assets to latest tag
         shell: bash
