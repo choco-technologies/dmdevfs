@@ -951,6 +951,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
+    memset(driver_node, 0, sizeof(driver_node_t));
 
     DMOD_LOG_STEP_PROGRESS(75, "Creating driver context: %s\n", driver_name);
     driver_node->was_loaded = was_loaded;
