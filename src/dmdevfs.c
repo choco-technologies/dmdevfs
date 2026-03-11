@@ -684,7 +684,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
         // Extract basename from the full path for the directory entry
         read_base_name(driver->path, entry->name, sizeof(entry->name));
         
-        dmdrvi_stat_t stat;
+        dmdrvi_stat_t stat = {0};
         int res = driver_stat(driver, driver->path, &stat);
         if (res != 0)
         {
