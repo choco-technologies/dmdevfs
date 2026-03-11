@@ -1161,16 +1161,16 @@ static void read_dir_name_from_path(const char* path, char* dir_name, size_t nam
 
 /**
  * @brief Extract the first path component of full_path that comes after base_path
- * @param base_path The directory currently being listed (e.g., "/" or "foo/")
- * @param full_path The driver's parent directory path (e.g., "foo/bar/")
+ * @param base_path The directory currently being listed (e.g., "/" or "/foo")
+ * @param full_path The driver's parent directory path (e.g., "/foo/bar/")
  * @param dir_name  Output buffer for the immediate subdirectory name
  * @param name_size Size of the output buffer
  *
  * Examples:
- * - base="/",      full="dmgpio8/"   -> "dmgpio8"
- * - base="/",      full="a/b/c/"     -> "a"
- * - base="a/",     full="a/b/c/"     -> "b"
- * - base="a/b/",   full="a/b/c/"     -> "c"
+ * - base="/",       full="/dmgpio8/"   -> "dmgpio8"
+ * - base="/",       full="/a/b/c/"     -> "a"
+ * - base="/a",      full="/a/b/c/"     -> "b"
+ * - base="/a/b",    full="/a/b/c/"     -> "c"
  */
 static void read_next_subdir_name(const char* base_path, const char* full_path, char* dir_name, size_t name_size)
 {
@@ -1193,8 +1193,8 @@ static void read_next_subdir_name(const char* base_path, const char* full_path, 
     const char* start;
     if (base_len == 1 && base_path[0] == '/')
     {
-        // Base is the root directory; full_path has no leading slash
-        start = full_path;
+        // Base is the root directory; skip the leading '/' in full_path if present
+        start = (full_path[0] == '/') ? full_path + 1 : full_path;
     }
     else
     {
@@ -1327,11 +1327,11 @@ static int read_driver_parent_directory( const driver_node_t* node, char* path_b
     bool minor_given = (node->dev_num.flags & DMDRVI_NUM_MINOR) != 0;
     if(major_given && minor_given)
     {
-        Dmod_SnPrintf(path_buffer, buffer_size, "%s%u/", driver_name, node->dev_num.major);
+        Dmod_SnPrintf(path_buffer, buffer_size, "/%s%u/", driver_name, node->dev_num.major);
     }
     else if(minor_given)
     {
-        Dmod_SnPrintf(path_buffer, buffer_size, "%sx/", driver_name);
+        Dmod_SnPrintf(path_buffer, buffer_size, "/%sx/", driver_name);
     }
     else 
     {
