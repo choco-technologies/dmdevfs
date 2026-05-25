@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 
 project(dmdevfs_tests VERSION 1.0 DESCRIPTION "DMDEVFS Unit Tests" LANGUAGES C)
+enable_testing()
 
 # Ensure DMOD is available
 if(NOT DMOD_DIR)
@@ -43,11 +44,12 @@ add_test(NAME dmdevfs_source_compiled
     COMMAND ${CMAKE_COMMAND} -E echo "Source files compiled successfully"
 )
 
-# Test 5: Ensure alternative names are listed from stable alt_path storage
-add_test(NAME dmdevfs_alt_name_listing_regression
-    COMMAND ${CMAKE_COMMAND}
-        -D SOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../src/dmdevfs.c
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_alt_name_listing.cmake
+# Test 5: Mocked driver flow regression for alternative-name root listing
+add_executable(dmdevfs_alt_name_flow_test
+    alt_name_flow_test.c
+)
+add_test(NAME dmdevfs_alt_name_flow
+    COMMAND dmdevfs_alt_name_flow_test
 )
 
 # Print information about tests

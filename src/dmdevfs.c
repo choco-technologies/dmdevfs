@@ -96,6 +96,7 @@ static int compare_driver_node_path( const void* data, const void* user_data );
 static int compare_driver_alt_path( const void* data, const void* user_data );
 static int compare_driver_alt_directory( const void* data, const void* user_data );
 static int compare_driver(const void* data, const void* user_data );
+static const char* normalize_directory_path( const char* path );
 static bool is_directory( dmfsi_context_t ctx, const char* path );
 static driver_node_t* get_next_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* dir_path );
 static driver_node_t* get_next_alt_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* dir_path );
@@ -651,19 +652,27 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
         DMOD_LOG_ERROR("Invalid context in opendir\n");
         return DMFSI_ERR_INVALID;
     }
+
+    if (dp == NULL || path == NULL)
+    {
+        DMOD_LOG_ERROR("NULL pointer in opendir\n");
+        return DMFSI_ERR_INVALID;
+    }
+
+    const char* normalized_path = normalize_directory_path(path);
     
-    if (!is_directory(ctx, path))
+    if (!is_directory(ctx, normalized_path))
     {
         // Check if the path is a file (device node)
-        driver_node_t* driver_node = find_driver_node(ctx, path);
+        driver_node_t* driver_node = find_driver_node(ctx, normalized_path);
         if (driver_node != NULL)
         {
             // Path exists but is a file, not a directory
-            DMOD_LOG_ERROR("Not a directory: %s\n", path);
+            DMOD_LOG_ERROR("Not a directory: %s\n", normalized_path);
             return DMFSI_ERR_NOT_FOUND;
         }
         // Path doesn't exist at all
-        DMOD_LOG_ERROR("Directory not found: %s\n", path);
+        DMOD_LOG_ERROR("Directory not found: %s\n", normalized_path);
         return DMFSI_ERR_NOT_FOUND;
     }
 
@@ -673,8 +682,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
         DMOD_LOG_ERROR("Failed to allocate memory for directory node\n");
         return DMFSI_ERR_GENERAL;
     }
-    dir_node->driver = get_next_driver_node(ctx, NULL, path);
-    dir_node->directory_path = Dmod_StrDup(path);
+    dir_node->driver = get_next_driver_node(ctx, NULL, normalized_path);
+    dir_node->directory_path = Dmod_StrDup(normalized_path);
     dir_node->in_alt_phase = false;
     dir_node->alt_driver = NULL;
     
@@ -1648,7 +1657,8 @@ static int compare_driver_alt_directory( const void* data, const void* user_data
     }
 
     // Alternative paths are always at the root level
-    return compare_paths_ignore_trailing_slash(dir_path, ROOT_DIRECTORY_NAME);
+    const char* normalized_path = normalize_directory_path(dir_path);
+    return compare_paths_ignore_trailing_slash(normalized_path, ROOT_DIRECTORY_NAME);
 }
 
 /**
@@ -1671,7 +1681,30 @@ static int compare_driver(const void* data, const void* user_data )
  */
 static bool is_directory( dmfsi_context_t ctx, const char* path )
 {
-    return strcmp(path, ROOT_DIRECTORY_NAME) == 0 || dmlist_find(ctx->drivers, path, compare_driver_directory) != NULL;
+    if (ctx == NULL || path == NULL)
+    {
+        return false;
+    }
+
+    const char* normalized_path = normalize_directory_path(path);
+    return strcmp(normalized_path, ROOT_DIRECTORY_NAME) == 0
+        || dmlist_find(ctx->drivers, normalized_path, compare_driver_directory) != NULL;
+}
+
+/**
+ * @brief Normalize directory path used by listing functions
+ *
+ * Some callers pass an empty path to represent root. Treat it as "/"
+ * so primary and alternative directory iterators use consistent matching.
+ */
+static const char* normalize_directory_path( const char* path )
+{
+    if (path == NULL || path[0] != '\0')
+    {
+        return path;
+    }
+
+    return ROOT_DIRECTORY_NAME;
 }
 
 /**
