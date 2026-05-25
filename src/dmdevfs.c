@@ -56,7 +56,7 @@ typedef struct
     const char* path;           // File path
     int mode;                   // File open mode
     int attr;                   // File attributes
-    size_t bytes_read;          // Total bytes read (used for EOF calculation when driver has no eof API)
+    uint32_t offset;            // Current byte offset within the device
 } file_handle_t;
 
 /**
@@ -254,7 +254,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
     handle->path = Dmod_StrDup(path);
     handle->mode = mode;
     handle->attr = attr;
-    handle->bytes_read = 0;
+    handle->offset = 0;
     
     *fp = handle;
     return DMFSI_OK;
@@ -326,9 +326,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
     }
     
     // dmdrvi_read returns size_t (bytes read), not error code
-    size_t bytes_read = dmdrvi_read(handle->driver->driver_context, handle->driver_handle, buffer, size);
+    size_t bytes_read = dmdrvi_read(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
     if(read) *read = bytes_read;
-    handle->bytes_read += bytes_read;
+    handle->offset += (uint32_t)bytes_read;
     
     return DMFSI_OK;
 }
@@ -363,17 +363,17 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
     }
     
     // dmdrvi_write returns size_t (bytes written), not error code
-    size_t bytes_written = dmdrvi_write(handle->driver->driver_context, handle->driver_handle, buffer, size);
+    size_t bytes_written = dmdrvi_write(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
     if(written) *written = bytes_written;
+    handle->offset += (uint32_t)bytes_written;
     
     return DMFSI_OK;
 }
 
 /**
  * @brief Seek to a position in a file
- * @note Not supported for device drivers - devices are typically non-seekable
  */
-dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _lseek, (dmfsi_context_t ctx, void* fp, long offset, int whence) )
+dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _lseek, (dmfsi_context_t ctx, void* fp, long offset, int whence) )
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
@@ -386,15 +386,46 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _lseek, (dmfsi_context_t ctx,
         return DMFSI_ERR_INVALID;
     }
     
-    // Device drivers typically don't support seek operations
-    // Return error to indicate operation not supported
-    DMOD_LOG_ERROR("lseek not supported for device drivers\n");
-    return DMFSI_ERR_GENERAL;
+    file_handle_t* handle = (file_handle_t*)fp;
+    long new_offset;
+
+    if(whence == DMFSI_SEEK_SET)
+    {
+        new_offset = offset;
+    }
+    else if(whence == DMFSI_SEEK_CUR)
+    {
+        new_offset = (long)handle->offset + offset;
+    }
+    else if(whence == DMFSI_SEEK_END)
+    {
+        dmdrvi_stat_t stat = {0};
+        int result = driver_stat(handle->driver, handle->path, &stat);
+        if(result != 0)
+        {
+            DMOD_LOG_ERROR("lseek SEEK_END: failed to get file size\n");
+            return DMFSI_ERR_GENERAL;
+        }
+        new_offset = (long)stat.size + offset;
+    }
+    else
+    {
+        DMOD_LOG_ERROR("lseek: invalid whence value %d\n", whence);
+        return DMFSI_ERR_INVALID;
+    }
+
+    if(new_offset < 0)
+    {
+        DMOD_LOG_ERROR("lseek: resulting offset is negative\n");
+        return DMFSI_ERR_INVALID;
+    }
+
+    handle->offset = (uint32_t)new_offset;
+    return new_offset;
 }
 
 /**
  * @brief Get current position in a file
- * @note Not supported for device drivers - devices are typically non-seekable
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx, void* fp) )
 {
@@ -409,16 +440,15 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx,
         return -1;
     }
     
-    // Device drivers typically don't support tell operations
-    DMOD_LOG_ERROR("tell not supported for device drivers\n");
-    return -1;
+    file_handle_t* handle = (file_handle_t*)fp;
+    return (long)handle->offset;
 }
 
 /**
  * @brief Check if at end of file
- * @note If the driver implements the eof API, it is used directly.
- *       Otherwise, EOF is determined by comparing bytes read against the file size.
- *       If file size is unavailable, 0 (not at EOF) is returned as EOF cannot be determined.
+ * @note EOF is determined by comparing the current offset against the file size
+ *       reported by the driver. If file size is unavailable, 0 (not at EOF) is
+ *       returned as EOF cannot be determined.
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, void* fp) )
 {
@@ -435,19 +465,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, v
     
     file_handle_t* handle = (file_handle_t*)fp;
     
-    // If the driver implements the eof API, delegate to it
-    dmod_dmdrvi_eof_t dmdrvi_eof = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_eof_sig);
-    if(dmdrvi_eof != NULL)
-    {
-        return dmdrvi_eof(handle->driver->driver_context, handle->driver_handle);
-    }
-    
-    // Fallback: compare bytes read against file size reported by driver
+    // Compare current offset against file size reported by driver
     dmdrvi_stat_t stat = {0};
     int result = driver_stat(handle->driver, handle->path, &stat);
     if(result == 0)
     {
-        return (handle->bytes_read >= (size_t)stat.size) ? 1 : 0;
+        return (handle->offset >= stat.size) ? 1 : 0;
     }
     
     // Size not available - cannot determine EOF

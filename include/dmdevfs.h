@@ -13,7 +13,7 @@ extern "C" {
 
 // Module version
 #define DMDEVFS_VERSION_MAJOR 0
-#define DMDEVFS_VERSION_MINOR 1
+#define DMDEVFS_VERSION_MINOR 2
 
 #ifdef __cplusplus
 }
