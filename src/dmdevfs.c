@@ -38,12 +38,15 @@ typedef struct
     bool was_loaded;                    // Indicates if the driver was loaded by dmdevfs
     bool was_enabled;                   // Indicates if the driver was enabled by dmdevfs
     path_t path;                        // Path associated with the driver
+    path_t alt_path;                    // Alternative path (empty string if not set)
 } driver_node_t;
 
 typedef struct
 {
-    driver_node_t* driver;   // Last driver
-    char* directory_path;   // Directory path
+    driver_node_t* driver;      // Current driver (primary phase)
+    char* directory_path;       // Directory path
+    bool in_alt_phase;          // Whether we are iterating alternative names
+    driver_node_t* alt_driver;  // Current driver in the alternative names phase
 } directory_node_t;
 
 /**
@@ -90,9 +93,12 @@ static int read_driver_node_path( const driver_node_t* node, char* path_buffer, 
 static int compare_paths_ignore_trailing_slash( const char* path1, const char* path2 );
 static int compare_driver_directory( const void* data, const void* user_data );
 static int compare_driver_node_path( const void* data, const void* user_data );
+static int compare_driver_alt_path( const void* data, const void* user_data );
+static int compare_driver_alt_directory( const void* data, const void* user_data );
 static int compare_driver(const void* data, const void* user_data );
 static bool is_directory( dmfsi_context_t ctx, const char* path );
 static driver_node_t* get_next_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* dir_path );
+static driver_node_t* get_next_alt_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* dir_path );
 
 static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path );
 static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t* stat );
@@ -669,6 +675,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
     }
     dir_node->driver = get_next_driver_node(ctx, NULL, path);
     dir_node->directory_path = Dmod_StrDup(path);
+    dir_node->in_alt_phase = false;
+    dir_node->alt_driver = NULL;
     
     *dp = dir_node;
 
@@ -688,47 +696,83 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
     }
     
     directory_node_t* dir_node = (directory_node_t*)dp;
-    if (dir_node->driver == NULL)
+
+    if (!dir_node->in_alt_phase)
+    {
+        // Primary phase: iterate drivers by their primary paths
+        if (dir_node->driver == NULL)
+        {
+            // No more primary entries; switch to alternative names phase
+            dir_node->in_alt_phase = true;
+            dir_node->alt_driver = get_next_alt_driver_node(ctx, NULL, dir_node->directory_path);
+        }
+        else
+        {
+            driver_node_t* driver = dir_node->driver;
+
+            path_t parent_dir;
+            if (read_driver_parent_directory(dir_node->driver, parent_dir, sizeof(parent_dir)) != 0)
+            {
+                DMOD_LOG_ERROR("Failed to read parent directory for driver\n");
+                return DMFSI_ERR_GENERAL;
+            }
+
+            bool file_should_be_listed = compare_paths_ignore_trailing_slash(dir_node->directory_path, parent_dir) == 0;
+            if(file_should_be_listed)
+            {
+                // Extract basename from the full path for the directory entry
+                read_base_name(driver->path, entry->name, sizeof(entry->name));
+                
+                dmdrvi_stat_t stat;
+                int res = driver_stat(driver, driver->path, &stat);
+                if (res != 0)
+                {
+                    DMOD_LOG_ERROR("Failed to get file stats for: %s\n", driver->path);
+                    return DMFSI_ERR_GENERAL;
+                }
+
+                entry->size = stat.size;
+                entry->attr = stat.mode;
+            }
+            else 
+            {
+                // Extract the immediate subdirectory name relative to the listing directory.
+                // E.g. listing "/" with a driver whose parent is "dmgpio8/" yields "dmgpio8".
+                read_next_subdir_name(dir_node->directory_path, parent_dir, entry->name, sizeof(entry->name));
+                entry->size = 0;
+                entry->attr = DMFSI_ATTR_DIRECTORY;
+            }
+
+            // Move to next driver for subsequent call
+            dir_node->driver = get_next_driver_node(ctx, driver, dir_node->directory_path);
+            return DMFSI_OK;
+        }
+    }
+
+    // Alternative names phase: iterate drivers that expose an alt_path in this directory
+    if (dir_node->alt_driver == NULL)
     {
         return DMFSI_ERR_NOT_FOUND; // No more entries
     }
-    driver_node_t* driver = dir_node->driver;
 
-    path_t parent_dir;
-    if (read_driver_parent_directory(dir_node->driver, parent_dir, sizeof(parent_dir)) != 0)
+    driver_node_t* alt_driver = dir_node->alt_driver;
+
+    strncpy(entry->name, alt_driver->dev_num.alt_name, sizeof(entry->name));
+    entry->name[sizeof(entry->name) - 1] = '\0';
+
+    dmdrvi_stat_t stat;
+    int res = driver_stat(alt_driver, alt_driver->path, &stat);
+    if (res != 0)
     {
-        DMOD_LOG_ERROR("Failed to read parent directory for driver\n");
+        DMOD_LOG_ERROR("Failed to get file stats for alt path: %s\n", alt_driver->alt_path);
         return DMFSI_ERR_GENERAL;
     }
 
-    bool file_should_be_listed = compare_paths_ignore_trailing_slash(dir_node->directory_path, parent_dir) == 0;
-    if(file_should_be_listed)
-    {
-        // Extract basename from the full path for the directory entry
-        read_base_name(driver->path, entry->name, sizeof(entry->name));
-        
-        dmdrvi_stat_t stat;
-        int res = driver_stat(driver, driver->path, &stat);
-        if (res != 0)
-        {
-            DMOD_LOG_ERROR("Failed to get file stats for: %s\n", driver->path);
-            return DMFSI_ERR_GENERAL;
-        }
+    entry->size = stat.size;
+    entry->attr = stat.mode;
 
-        entry->size = stat.size;
-        entry->attr = stat.mode;
-    }
-    else 
-    {
-        // Extract the immediate subdirectory name relative to the listing directory.
-        // E.g. listing "/" with a driver whose parent is "dmgpio8/" yields "dmgpio8".
-        read_next_subdir_name(dir_node->directory_path, parent_dir, entry->name, sizeof(entry->name));
-        entry->size = 0;
-        entry->attr = DMFSI_ATTR_DIRECTORY;
-    }
-
-    // Move to next driver for subsequent call
-    dir_node->driver = get_next_driver_node(ctx, driver, dir_node->directory_path);
+    // Advance to the next driver with an alt_path in this directory
+    dir_node->alt_driver = get_next_alt_driver_node(ctx, alt_driver, dir_node->directory_path);
     return DMFSI_OK;
 }
 
@@ -1001,6 +1045,14 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         Dmod_Free(driver_node);
         DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
+    }
+
+    driver_node->alt_path[0] = '\0';
+    if (driver_node->dev_num.flags & DMDRVI_NUM_ALT_NAME)
+    {
+        Dmod_SnPrintf(driver_node->alt_path, sizeof(driver_node->alt_path),
+                      "/%s", driver_node->dev_num.alt_name);
+        DMOD_LOG_INFO("Driver %s has alternative path: %s\n", driver_name, driver_node->alt_path);
     }
 
     DMOD_LOG_STEP(0, "Configured driver: %s (path: %s)\n", driver_name, driver_node->path);
@@ -1556,6 +1608,51 @@ static int compare_driver_node_path( const void* data, const void* user_data )
 }
 
 /**
+ * @brief Compare the alternative path of a driver node with a given path
+ */
+static int compare_driver_alt_path( const void* data, const void* user_data )
+{
+    const driver_node_t* node = (const driver_node_t*)data;
+    const char* path = (const char*)user_data;
+    if (node == NULL || path == NULL)
+    {
+        return 1;
+    }
+
+    if (node->alt_path[0] == '\0')
+    {
+        return 1; // No alternative path set
+    }
+
+    return strcmp(node->alt_path, path);
+}
+
+/**
+ * @brief Check whether a driver node has an alternative path reachable from
+ *        the given directory.
+ *
+ * Alternative paths are always placed at the root level (e.g. "/my_sensor"),
+ * so a driver is only reachable in this way when listing the root directory.
+ */
+static int compare_driver_alt_directory( const void* data, const void* user_data )
+{
+    const driver_node_t* node = (const driver_node_t*)data;
+    const char* dir_path = (const char*)user_data;
+    if (node == NULL || dir_path == NULL)
+    {
+        return 1;
+    }
+
+    if (node->alt_path[0] == '\0')
+    {
+        return 1; // No alternative path set
+    }
+
+    // Alternative paths are always at the root level
+    return compare_paths_ignore_trailing_slash(dir_path, ROOT_DIRECTORY_NAME);
+}
+
+/**
  * @brief Compare a driver node with a given driver node
  */
 static int compare_driver(const void* data, const void* user_data )
@@ -1587,11 +1684,24 @@ static driver_node_t* get_next_driver_node( dmfsi_context_t ctx, driver_node_t* 
 }
 
 /**
- * @brief Find a driver node by its path
+ * @brief Get the next driver node that has an alternative path inside the given directory
+ */
+static driver_node_t* get_next_alt_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* dir_path )
+{
+    return dmlist_find_next(ctx->drivers, current, dir_path, compare_driver_alt_directory);
+}
+
+/**
+ * @brief Find a driver node by its path (primary or alternative)
  */
 static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path )
 {
-    return dmlist_find(ctx->drivers, path, compare_driver_node_path);
+    driver_node_t* node = dmlist_find(ctx->drivers, path, compare_driver_node_path);
+    if (node == NULL)
+    {
+        node = dmlist_find(ctx->drivers, path, compare_driver_alt_path);
+    }
+    return node;
 }
 
 /**

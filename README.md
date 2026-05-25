@@ -282,7 +282,40 @@ When a driver is initialized through its `dmdrvi_create()` function, it returns 
 The device number consists of:
 - **major**: Primary device identifier (typically for device type or bus)
 - **minor**: Secondary device identifier (typically for device instance)
-- **flags**: Indicates which numbers are provided (`DMDRVI_NUM_MAJOR`, `DMDRVI_NUM_MINOR`)
+- **flags**: Indicates which numbers are provided (`DMDRVI_NUM_MAJOR`, `DMDRVI_NUM_MINOR`, `DMDRVI_NUM_ALT_NAME`)
+- **alt_name**: Optional alternative (human-friendly) file name, valid when `DMDRVI_NUM_ALT_NAME` flag is set
+
+#### Path Generation Rules
+
+The resulting filesystem path depends on which device numbers the driver provides:
+
+| Major | Minor | Resulting Path | Example |
+|-------|-------|----------------|---------|
+| ✓ | ✓ | `<driver_name><major>/<minor>` | `dmspiflash0/1` |
+| ✗ | ✓ | `<driver_name>x/<minor>` | `dmspiflashx/0` |
+| ✓ | ✗ | `<driver_name><major>` | `dmspiflash0` |
+| ✗ | ✗ | `<driver_name>` | `dmspiflash` |
+
+#### Alternative Names
+
+When a driver sets the `DMDRVI_NUM_ALT_NAME` flag and provides an `alt_name` in
+`dmdrvi_dev_num_t`, DMDEVFS creates an additional mapping from `/<alt_name>` at
+the root of the filesystem to the same driver node.
+
+- The alternative name appears as a separate entry when listing the root directory.
+- Opening, reading, writing, or stat-ing the alternative path works identically to
+  using the primary path.
+- The `alt_name` flag can be combined with `DMDRVI_NUM_MAJOR` and/or
+  `DMDRVI_NUM_MINOR` — the primary path is still generated normally and both
+  paths remain accessible simultaneously.
+
+**Example 5: Driver with Alternative Name**
+
+A GPIO driver configured as a temperature-sensor pin might set `alt_name = "temp_sensor"`:
+
+Accessible paths:
+- Primary: `/mnt/dmgpio3` (major=3, no minor)
+- Alternative: `/mnt/temp_sensor`
 
 #### Path Generation Rules
 
