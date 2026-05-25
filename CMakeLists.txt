@@ -36,12 +36,12 @@ set(DMOD_BUILD_EXAMPLES OFF CACHE BOOL "Build examples")
 set(DMOD_BUILD_TOOLS OFF CACHE BOOL "Build tools")
 set(DMOD_BUILD_TEMPLATES OFF CACHE BOOL "Build templates")
 
-FetchContent_MakeAvailable(dmod)
-
 project(dmdevfs
     VERSION ${DMOD_MODULE_VERSION}
     DESCRIPTION "DMOD Driver File System"
     LANGUAGES C CXX)
+
+FetchContent_MakeAvailable(dmod)
 
 # ======================================================================
 #               Import dmod functions and macros
