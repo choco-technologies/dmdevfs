@@ -757,8 +757,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
 
     driver_node_t* alt_driver = dir_node->alt_driver;
 
-    strncpy(entry->name, alt_driver->dev_num.alt_name, sizeof(entry->name));
-    entry->name[sizeof(entry->name) - 1] = '\0';
+    read_base_name(alt_driver->alt_path, entry->name, sizeof(entry->name));
 
     dmdrvi_stat_t stat;
     int res = driver_stat(alt_driver, alt_driver->path, &stat);

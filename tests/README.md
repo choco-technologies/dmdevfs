@@ -69,6 +69,7 @@ Current automated tests verify:
 - Module compilation succeeds
 - Module output files are generated
 - Build system integration works correctly
+- Alternative-name directory listing keeps using stable `alt_path` storage
 
 With fs_tester integration:
 - File system interface implementation

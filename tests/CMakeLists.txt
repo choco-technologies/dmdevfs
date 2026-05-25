@@ -43,6 +43,13 @@ add_test(NAME dmdevfs_source_compiled
     COMMAND ${CMAKE_COMMAND} -E echo "Source files compiled successfully"
 )
 
+# Test 5: Ensure alternative names are listed from stable alt_path storage
+add_test(NAME dmdevfs_alt_name_listing_regression
+    COMMAND ${CMAKE_COMMAND}
+        -D SOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../src/dmdevfs.c
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_alt_name_listing.cmake
+)
+
 # Print information about tests
 message(STATUS "DMDEVFS tests configured")
 message(STATUS "  Module output directory: ${CMAKE_BINARY_DIR}/dmf")
