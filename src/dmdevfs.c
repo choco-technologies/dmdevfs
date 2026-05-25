@@ -1401,6 +1401,7 @@ static int read_driver_node_path( const driver_node_t* node, char* path_buffer, 
     }
     bool major_given = (node->dev_num.flags & DMDRVI_NUM_MAJOR) != 0;
     bool minor_given = (node->dev_num.flags & DMDRVI_NUM_MINOR) != 0;
+    bool name_given = (node->dev_num.flags & DMDRVI_NUM_ALT_NAME) != 0 && node->dev_num.alt_name[0] != '\0';
     size_t current_length = strlen(path_buffer);
     if(current_length >= buffer_size)
     {
@@ -1409,7 +1410,11 @@ static int read_driver_node_path( const driver_node_t* node, char* path_buffer, 
     }
     path_buffer += current_length;
     buffer_size -= current_length;
-    if(minor_given)
+    if(name_given)
+    {
+        Dmod_SnPrintf(path_buffer, buffer_size, "%s", node->dev_num.alt_name);
+    }
+    else if(minor_given)
     {
         Dmod_SnPrintf(path_buffer, buffer_size, "%u", node->dev_num.minor);
     }
