@@ -653,7 +653,6 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
         if (driver_node != NULL)
         {
             // Path exists but is a file, not a directory
-            DMOD_LOG_ERROR("Not a directory: %s\n", path);
             return DMFSI_ERR_NOT_FOUND;
         }
         // Path doesn't exist at all
