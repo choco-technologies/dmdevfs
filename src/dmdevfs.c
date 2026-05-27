@@ -726,8 +726,38 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
         entry->attr = DMFSI_ATTR_DIRECTORY;
     }
 
-    // Move to next driver for subsequent call
-    dir_node->driver = get_next_driver_node(ctx, driver, dir_node->directory_path);
+    // Move to next driver for subsequent call.
+    // When this entry is a directory, skip subsequent drivers that would emit
+    // the same immediate subdirectory name to avoid duplicate directory entries.
+    driver_node_t* next_driver = get_next_driver_node(ctx, driver, dir_node->directory_path);
+    if (!file_should_be_listed)
+    {
+        while (next_driver != NULL)
+        {
+            path_t next_parent_dir;
+            if (read_driver_parent_directory(next_driver, next_parent_dir, sizeof(next_parent_dir)) != 0)
+            {
+                DMOD_LOG_ERROR("Failed to read parent directory for next driver\n");
+                return DMFSI_ERR_GENERAL;
+            }
+
+            bool next_is_file_in_listed_dir = compare_paths_ignore_trailing_slash(dir_node->directory_path, next_parent_dir) == 0;
+            if (next_is_file_in_listed_dir)
+            {
+                break;
+            }
+
+            path_t next_subdir_name;
+            read_next_subdir_name(dir_node->directory_path, next_parent_dir, next_subdir_name, sizeof(next_subdir_name));
+            if (strcmp(next_subdir_name, entry->name) != 0)
+            {
+                break;
+            }
+
+            next_driver = get_next_driver_node(ctx, next_driver, dir_node->directory_path);
+        }
+    }
+    dir_node->driver = next_driver;
     return DMFSI_OK;
 }
 
