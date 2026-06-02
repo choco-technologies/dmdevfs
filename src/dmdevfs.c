@@ -74,7 +74,7 @@ struct dmfsi_context
 //                      Local prototypes
 // ============================================================================
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path);
-static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx);
+static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx, const char* section_name);
 static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx);
 static int unconfigure_drivers(dmfsi_context_t ctx);
 static bool is_file(const char* path);
@@ -933,7 +933,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             int section_drivers_added = configure_section_drivers(ctx, config_ctx);
             if (section_drivers_added == 0)
             {
-                driver_node_t* driver_node = configure_driver(module_name, config_ctx);
+                driver_node_t* driver_node = configure_driver(module_name, config_ctx, NULL);
                 if (driver_node != NULL)
                 {
                     if(!dmlist_push_back(ctx->drivers, driver_node))
@@ -972,7 +972,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
 /**
  * @brief Configure a single driver based on its name and configuration file
  */
-static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx)
+static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx, const char* section_name)
 {
     DMOD_LOG_STEP_BEGIN("Configuring driver: %s\n", driver_name);
     bool was_loaded = false;
@@ -1017,6 +1017,19 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
+
+    if ((driver_node->dev_num.flags & DMDRVI_NUM_ALT_NAME) != 0 && driver_node->dev_num.alt_name[0] == '\0')
+    {
+        if (section_name != NULL && section_name[0] != '\0' && strcmp(section_name, driver_name) != 0)
+        {
+            Dmod_SnPrintf(driver_node->dev_num.alt_name, sizeof(driver_node->dev_num.alt_name), "%s", section_name);
+        }
+        else
+        {
+            driver_node->dev_num.flags &= ~DMDRVI_NUM_ALT_NAME;
+        }
+    }
+
     DMOD_LOG_STEP_PROGRESS(90, "Reading driver node path: %s\n", driver_name);
     if(read_driver_node_path( driver_node, driver_node->path, sizeof(driver_node->path) ) != 0)
     {
@@ -1074,7 +1087,7 @@ static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config
         // Restrict the INI context to this section and configure the driver.
         // Token 0 means no owner-token protection (context was created with dmini_create).
         dmini_set_active_section(config_ctx, section_name, 0);
-        driver_node_t* driver_node = configure_driver(module_name, config_ctx);
+        driver_node_t* driver_node = configure_driver(module_name, config_ctx, section_name);
         dmini_clear_active_section(config_ctx, 0);
 
         if (driver_node == NULL)
