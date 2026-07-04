@@ -141,7 +141,18 @@ parameter2 = value2
 
 #### Optional Fields
 
+- **`driver_order`**: An integer that controls when the driver is configured relative to other drivers. All drivers with `driver_order = 0` (the default when the field is omitted) are configured before any driver with `driver_order = 1`, which in turn is configured before `driver_order = 2`, and so on. Use this to force a driver to be configured after another one when there is no dmod dependency between them to infer the order from automatically.
+
 Any additional parameters in the configuration file are passed to the driver's initialization function. The interpretation of these parameters depends on the specific driver implementation.
+
+### Configuration Ordering
+
+Two mechanisms determine the order in which drivers are configured (i.e. the order `dmdrvi_create()` is called for each of them):
+
+1. **Dependencies (automatic)**: If a driver module declares another module as required (as read from dmod), DMDEVFS ensures the required module is configured first, even if its configuration file would otherwise have been processed later. This matters because dmod only guarantees a required module is *loaded and enabled* before a dependent module is loaded — not that it has already been configured by DMDEVFS. For example, if a UART driver requires a clock driver, the clock driver's own `.ini` configuration is applied before the UART driver's, so the clock is already set up by the time the UART driver configures itself.
+2. **`driver_order` (manual)**: Within what dependencies leave unconstrained, drivers are configured in ascending `driver_order` groups (default `0`). This is a manual escape hatch for ordering requirements that aren't expressed as a dmod dependency.
+
+Dependency resolution always takes precedence over `driver_order`: if a driver in a later `driver_order` group is required by one in an earlier group, it is still configured first.
 
 ### Configuration Directory Structure
 

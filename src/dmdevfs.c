@@ -47,6 +47,23 @@ typedef struct
 } directory_node_t;
 
 /**
+ * @brief A driver configuration discovered while walking the config tree, waiting
+ *        to be applied. Configuration is deferred so that `driver_order` and
+ *        inter-module dependencies (as reported by dmod) can be resolved across
+ *        the whole config tree before any driver is actually created.
+ */
+typedef struct
+{
+    char module_name[DMOD_MAX_MODULE_NAME_LENGTH];   // Driver module to configure
+    char section_name[DMOD_MAX_MODULE_NAME_LENGTH];  // Section within config_ctx (only if has_section)
+    bool has_section;                                // Whether section_name is a real INI section
+    dmini_context_t config_ctx;                       // INI context (owned by the config file, not by this entry)
+    int driver_order;                                 // Explicit ordering group (default 0)
+    bool configured;                                  // Already turned into a driver_node_t
+    bool configuring;                                 // Cycle guard while resolving dependencies
+} pending_driver_t;
+
+/**
  * @brief File handle structure for file operations
  */
 typedef struct
@@ -74,8 +91,13 @@ struct dmfsi_context
 //                      Local prototypes
 // ============================================================================
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path);
+static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* config_files, const char* driver_name, const char* config_path);
+static int collect_section_driver_configs(dmlist_context_t* pending, dmini_context_t config_ctx);
+static bool add_pending_driver(dmlist_context_t* pending, const char* module_name, dmini_context_t config_ctx, const char* section_name, int driver_order);
+static int configure_pending_drivers(dmfsi_context_t ctx, dmlist_context_t* pending);
+static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry);
+static bool configure_required_dependencies(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry);
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx, const char* section_name);
-static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx);
 static int unconfigure_drivers(dmfsi_context_t ctx);
 static bool is_file(const char* path);
 static bool is_driver( const char* name);
@@ -884,8 +906,61 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _rename, (dmfsi_context_t ctx
 
 /**
  * @brief Configure drivers based on the configuration file
+ *
+ * Configuration happens in two phases so that ordering can be resolved across
+ * the whole config tree instead of just in directory-read order:
+ *  1. Walk the config tree and collect every driver configuration into a
+ *     pending queue, ordered by `driver_order` (see collect_driver_configs).
+ *  2. Actually create the drivers, pulling forward (out of order if needed)
+ *     any pending driver that is required (per dmod) by the one being
+ *     configured, so a driver is never dmdrvi_create'd before the modules it
+ *     depends on have already gone through their own configuration.
  */
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path)
+{
+    dmlist_context_t* pending = dmlist_create(DMOD_MODULE_NAME);
+    dmlist_context_t* config_files = dmlist_create(DMOD_MODULE_NAME);
+    if (pending == NULL || config_files == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate driver configuration queues\n");
+        dmlist_destroy(pending);
+        dmlist_destroy(config_files);
+        return DMFSI_ERR_GENERAL;
+    }
+
+    int res = collect_driver_configs(pending, config_files, driver_name, config_path);
+    if (res == DMFSI_OK)
+    {
+        configure_pending_drivers(ctx, pending);
+    }
+
+    size_t pending_count = dmlist_size(pending);
+    for (size_t i = 0; i < pending_count; i++)
+    {
+        Dmod_Free(dmlist_get(pending, i));
+    }
+    dmlist_destroy(pending);
+
+    size_t config_files_count = dmlist_size(config_files);
+    for (size_t i = 0; i < config_files_count; i++)
+    {
+        dmini_destroy((dmini_context_t)dmlist_get(config_files, i));
+    }
+    dmlist_destroy(config_files);
+
+    return res;
+}
+
+/**
+ * @brief Walk the config tree, queuing every driver configuration it finds
+ *
+ * This mirrors the directory traversal that used to configure drivers
+ * immediately, except it only records what needs to be configured. The INI
+ * contexts are kept alive in `config_files` until the whole tree has been
+ * queued and configured, since a single file's context may still be needed
+ * later on (e.g. as a dependency of a driver queued elsewhere).
+ */
+static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* config_files, const char* driver_name, const char* config_path)
 {
     void* dir = Dmod_OpenDir(config_path);
     if (dir == NULL)
@@ -901,22 +976,22 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
         char full_path[MAX_PATH_LENGTH];
         size_t config_path_len = strlen(config_path);
         size_t entry_len = strlen(entry);
-        
+
         // Check if we need a separator
         bool needs_separator = (config_path_len > 0 && config_path[config_path_len - 1] != '/');
         size_t required_len = config_path_len + (needs_separator ? 1 : 0) + entry_len + 1;
-        
+
         if (required_len > MAX_PATH_LENGTH)
         {
             DMOD_LOG_ERROR("Path too long: %s/%s\n", config_path, entry);
             continue;
         }
-        
-        Dmod_SnPrintf(full_path, sizeof(full_path), "%s%s%s", 
-                      config_path, 
-                      needs_separator ? "/" : "", 
+
+        Dmod_SnPrintf(full_path, sizeof(full_path), "%s%s%s",
+                      config_path,
+                      needs_separator ? "/" : "",
                       entry);
-        
+
         if (is_file(full_path))
         {
             char module_name[DMOD_MAX_MODULE_NAME_LENGTH];
@@ -927,29 +1002,27 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
                 continue;
             }
 
+            if (!dmlist_push_back(config_files, config_ctx))
+            {
+                DMOD_LOG_ERROR("Failed to track config context for: %s\n", full_path);
+                dmini_destroy(config_ctx);
+                continue;
+            }
+
             // Section-specific driver_name entries take priority over the file/directory
-            // derived driver name. Only configure the main driver when no section-level
+            // derived driver name. Only queue the main driver when no section-level
             // drivers are present in the file.
-            int section_drivers_added = configure_section_drivers(ctx, config_ctx);
+            int section_drivers_added = collect_section_driver_configs(pending, config_ctx);
             if (section_drivers_added == 0)
             {
-                driver_node_t* driver_node = configure_driver(module_name, config_ctx, NULL);
-                if (driver_node != NULL)
+                int driver_order = dmini_get_int(config_ctx, INI_MAIN_SECTION, "driver_order", 0);
+                if (!add_pending_driver(pending, module_name, config_ctx, NULL, driver_order))
                 {
-                    if(!dmlist_push_back(ctx->drivers, driver_node))
-                    {
-                        DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
-                        Dmod_Free(driver_node);
-                    }
-                }
-                else
-                {
-                    DMOD_LOG_ERROR("Failed to configure driver: %s\n", module_name);
+                    DMOD_LOG_ERROR("Failed to queue driver configuration: %s\n", module_name);
                 }
             }
-            dmini_destroy(config_ctx);
         }
-        else 
+        else
         {
             // read driver name from directory name
             char module_name[DMOD_MAX_MODULE_NAME_LENGTH];
@@ -958,7 +1031,7 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
             {
                 driver_name = module_name;
             }
-            int res = configure_drivers(ctx, driver_name, full_path);
+            int res = collect_driver_configs(pending, config_files, driver_name, full_path);
             if (res != DMFSI_OK)
             {
                 DMOD_LOG_ERROR("Failed to configure drivers in directory: %s\n", full_path);
@@ -1051,18 +1124,19 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
 }
 
 /**
- * @brief Configure drivers for non-main sections that contain a driver_name key
+ * @brief Queue drivers for non-main sections that contain a driver_name key
  *
  * Iterates over all sections in the dmini context using dmini_section_count
  * and dmini_section_name. For each non-main section that contains a driver_name
- * key, the INI context is restricted to that section via dmini_set_active_section
- * so the driver only sees the keys belonging to its own section.
+ * key, a pending entry is queued that remembers the section name so the INI
+ * context can be restricted to it (via dmini_set_active_section) at the point
+ * it is actually configured.
  *
- * Returns the number of section-specific drivers that were successfully added.
+ * Returns the number of section-specific drivers that were successfully queued.
  * A non-zero return value signals to the caller that the file is a multi-driver
- * config and no fallback main driver should be configured.
+ * config and no fallback main driver should be queued.
  */
-static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config_ctx)
+static int collect_section_driver_configs(dmlist_context_t* pending, dmini_context_t config_ctx)
 {
     int num_added = 0;
     int section_count = dmini_section_count(config_ctx);
@@ -1080,33 +1154,202 @@ static int configure_section_drivers(dmfsi_context_t ctx, dmini_context_t config
         const char* drv_name = dmini_get_string(config_ctx, section_name, "driver_name", NULL);
         if (drv_name == NULL) continue;
 
-        char module_name[DMOD_MAX_MODULE_NAME_LENGTH];
-        strncpy(module_name, drv_name, sizeof(module_name));
-        module_name[sizeof(module_name) - 1] = '\0';
+        int driver_order = dmini_get_int(config_ctx, section_name, "driver_order", 0);
 
-        // Restrict the INI context to this section and configure the driver.
-        // Token 0 means no owner-token protection (context was created with dmini_create).
-        dmini_set_active_section(config_ctx, section_name, 0);
-        driver_node_t* driver_node = configure_driver(module_name, config_ctx, section_name);
-        dmini_clear_active_section(config_ctx, 0);
-
-        if (driver_node == NULL)
+        if (add_pending_driver(pending, drv_name, config_ctx, section_name, driver_order))
         {
-            DMOD_LOG_ERROR("Failed to configure driver for section [%s]: %s\n",
-                           section_name, module_name);
-        }
-        else if (!dmlist_push_back(ctx->drivers, driver_node))
-        {
-            DMOD_LOG_ERROR("Failed to add driver to list: %s\n", module_name);
-            Dmod_Free(driver_node);
+            num_added++;
         }
         else
         {
-            num_added++;
+            DMOD_LOG_ERROR("Failed to queue driver configuration for section [%s]: %s\n",
+                           section_name, drv_name);
         }
     }
 
     return num_added;
+}
+
+/**
+ * @brief Queue a driver configuration, inserted in `driver_order` position
+ *
+ * Entries are kept sorted by ascending driver_order (default 0), using a
+ * stable insertion so entries that share the same driver_order stay in the
+ * order they were discovered while walking the config tree.
+ */
+static bool add_pending_driver(dmlist_context_t* pending, const char* module_name, dmini_context_t config_ctx, const char* section_name, int driver_order)
+{
+    pending_driver_t* new_entry = Dmod_Malloc(sizeof(pending_driver_t));
+    if (new_entry == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate pending driver entry: %s\n", module_name);
+        return false;
+    }
+
+    memset(new_entry, 0, sizeof(*new_entry));
+    strncpy(new_entry->module_name, module_name, sizeof(new_entry->module_name));
+    new_entry->module_name[sizeof(new_entry->module_name) - 1] = '\0';
+    new_entry->config_ctx = config_ctx;
+    new_entry->driver_order = driver_order;
+    if (section_name != NULL)
+    {
+        new_entry->has_section = true;
+        strncpy(new_entry->section_name, section_name, sizeof(new_entry->section_name));
+        new_entry->section_name[sizeof(new_entry->section_name) - 1] = '\0';
+    }
+
+    size_t count = dmlist_size(pending);
+    size_t insert_pos = count;
+    for (size_t i = 0; i < count; i++)
+    {
+        pending_driver_t* existing = (pending_driver_t*)dmlist_get(pending, i);
+        if (existing->driver_order > driver_order)
+        {
+            insert_pos = i;
+            break;
+        }
+    }
+
+    if (!dmlist_insert(pending, insert_pos, new_entry))
+    {
+        Dmod_Free(new_entry);
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief Configure every queued driver, respecting driver_order and dependencies
+ */
+static int configure_pending_drivers(dmfsi_context_t ctx, dmlist_context_t* pending)
+{
+    size_t count = dmlist_size(pending);
+    for (size_t i = 0; i < count; i++)
+    {
+        pending_driver_t* entry = (pending_driver_t*)dmlist_get(pending, i);
+        if (!entry->configured)
+        {
+            configure_pending_entry(ctx, pending, entry);
+        }
+    }
+    return DMFSI_OK;
+}
+
+/**
+ * @brief Configure a single queued driver, first configuring any of its
+ *        still-pending required modules
+ *
+ * dmod already guarantees required modules are loaded and enabled before a
+ * driver is loaded, but that is not enough: a required module may not have
+ * gone through its own dmdrvi_create yet, so it can still be functionally
+ * unconfigured (e.g. a clock not yet set up) when a dependent driver tries to
+ * use it during its own configuration. Resolving dependencies here, ahead of
+ * driver_order, ensures a driver's prerequisites are always configured first.
+ */
+static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry)
+{
+    if (entry->configured)
+    {
+        return true;
+    }
+    if (entry->configuring)
+    {
+        DMOD_LOG_ERROR("Circular driver dependency detected while configuring: %s\n", entry->module_name);
+        return false;
+    }
+
+    entry->configuring = true;
+    bool deps_ok = configure_required_dependencies(ctx, pending, entry);
+    entry->configuring = false;
+
+    if (!deps_ok)
+    {
+        DMOD_LOG_ERROR("Failed to configure driver: %s\n", entry->module_name);
+        return false;
+    }
+
+    // Restrict the INI context to this entry's section (if any) so the driver
+    // only sees its own keys, mirroring what the immediate-configuration code
+    // used to do around each dmdrvi_create call. Without this, section == NULL
+    // lookups inside the driver resolve to the empty global section instead of
+    // the intended one, silently handing the driver only default values.
+    driver_node_t* driver_node;
+    if (entry->has_section)
+    {
+        dmini_set_active_section(entry->config_ctx, entry->section_name, 0);
+        driver_node = configure_driver(entry->module_name, entry->config_ctx, entry->section_name);
+        dmini_clear_active_section(entry->config_ctx, 0);
+    }
+    else
+    {
+        driver_node = configure_driver(entry->module_name, entry->config_ctx, NULL);
+    }
+
+    if (driver_node == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to configure driver: %s\n", entry->module_name);
+        return false;
+    }
+
+    if (!dmlist_push_back(ctx->drivers, driver_node))
+    {
+        DMOD_LOG_ERROR("Failed to add driver to list: %s\n", entry->module_name);
+        Dmod_Free(driver_node);
+        return false;
+    }
+
+    entry->configured = true;
+    return true;
+}
+
+/**
+ * @brief Make sure every module required (per dmod) by `entry` is already configured
+ *
+ * Dependencies are read via Dmod_IsModuleRequired() against dmod's live module
+ * registry rather than via Dmod_FindModuleFile()/Dmod_ReadRequiredModules() on
+ * a module file. The file-based APIs only work when each module exists as a
+ * standalone .dmf/.dmfc on a search path; on targets where all modules are
+ * bundled into a single embedded package (e.g. modules.dmp baked into ROM),
+ * no individual file can ever be found, silently turning dependency detection
+ * into a no-op. Dmod_IsModuleRequired() instead inspects the module's context
+ * once it is loaded (from a file or from a package alike), so it works in
+ * both deployment styles.
+ */
+static bool configure_required_dependencies(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry)
+{
+    // Load (without enabling/configuring) so dmod records entry's required
+    // modules; prepare_driver_module() will see it as already loaded shortly
+    // after and skip straight to enabling it.
+    if (Dmod_LoadModuleByName(entry->module_name) == NULL)
+    {
+        // Let configure_driver() surface and log the real load failure.
+        return true;
+    }
+
+    size_t count = dmlist_size(pending);
+    for (size_t i = 0; i < count; i++)
+    {
+        pending_driver_t* candidate = (pending_driver_t*)dmlist_get(pending, i);
+        if (candidate == entry || candidate->configured)
+        {
+            continue;
+        }
+
+        if (!Dmod_IsModuleRequired(entry->module_name, candidate->module_name))
+        {
+            continue;
+        }
+
+        if (!configure_pending_entry(ctx, pending, candidate))
+        {
+            DMOD_LOG_ERROR("Failed to configure required driver '%s' needed by '%s'\n",
+                           candidate->module_name, entry->module_name);
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /**
