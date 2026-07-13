@@ -15,9 +15,10 @@
 #include "dmlist.h"
 #include "dmini.h"
 #include "dmdrvi.h"
+#include "dmosi.h"
 #include <string.h>
 
-/** 
+/**
  * @brief Magic number for DMDEVFS context validation
  */
 #define DMDEVFS_CONTEXT_MAGIC 0x444D4456  // 'DMDV'
@@ -26,17 +27,33 @@
 #define INI_MAIN_SECTION "main"
 
 /**
+ * @brief Hot-plug worker thread configuration
+ *
+ * MAL notifications (dmdrvi_device_available()/_unavailable()) only enqueue an
+ * event and return - the actual work (searching/mutating the driver list) is
+ * done on this dedicated thread, so a driver announcing a hot-plug event never
+ * blocks on dmdevfs-internal bookkeeping.
+ */
+#define DMDEVFS_HOTPLUG_QUEUE_LENGTH        8
+#define DMDEVFS_HOTPLUG_THREAD_PRIORITY     1
+#define DMDEVFS_HOTPLUG_THREAD_STACK_SIZE   (512 + DMOSI_THREAD_STACK_OVERHEAD)
+#define DMDEVFS_HOTPLUG_THREAD_NAME         "dmdevfs_hotplug"
+
+/**
  * @brief Type definition for path strings
  */
 typedef char path_t[MAX_PATH_LENGTH];
 
-typedef struct 
+typedef struct
 {
     dmdrvi_context_t driver_context;    // Driver-specific context
     Dmod_Context_t*  driver;            // Driver module context
     dmdrvi_dev_num_t dev_num;           // Device number assigned to the driver
     bool was_loaded;                    // Indicates if the driver was loaded by dmdevfs
     bool was_enabled;                   // Indicates if the driver was enabled by dmdevfs
+    bool is_dynamic;                    // True for devices announced via dmdrvi_device_available() (hot-plug);
+                                         // such nodes share driver_context/driver with their owning node and must
+                                         // never be passed to dmdrvi_free()/cleanup_driver_module() themselves.
     path_t path;                        // Path associated with the driver
 } driver_node_t;
 
@@ -45,6 +62,30 @@ typedef struct
     driver_node_t* driver;   // Last driver
     char* directory_path;   // Directory path
 } directory_node_t;
+
+/**
+ * @brief Lookup key used to find a dynamic (hot-plugged) driver_node_t by
+ *        the (driver context, device number) pair reported through the
+ *        dmdrvi hot-plug MAL callbacks.
+ */
+typedef struct
+{
+    dmdrvi_context_t context;
+    const dmdrvi_dev_num_t* dev_num;
+} dynamic_device_lookup_t;
+
+/**
+ * @brief Hot-plug event queued from dmdrvi_device_available()/_unavailable()
+ *        for the hot-plug worker thread to process.
+ *
+ * context == NULL is reserved as the shutdown sentinel (see dmod_deinit()).
+ */
+typedef struct
+{
+    dmdrvi_context_t context;
+    dmdrvi_dev_num_t dev_num;
+    bool available;   // true: device became available, false: no longer available
+} hotplug_event_t;
 
 /**
  * @brief A driver configuration discovered while walking the config tree, waiting
@@ -86,6 +127,38 @@ struct dmfsi_context
     dmlist_context_t* drivers;  // List of loaded drivers
 };
 
+/**
+ * @brief Registry of all live dmdevfs mounts (struct dmfsi_context*)
+ *
+ * dmdrvi_device_available()/dmdrvi_device_unavailable() are MAL callbacks
+ * invoked by a driver with only its dmdrvi_context_t - not the dmfsi_context_t
+ * of the dmdevfs mount that created it. This registry lets those callbacks find
+ * the right mount (and driver_node_t) to update.
+ */
+static dmlist_context_t* g_dmdevfs_mounts = NULL;
+
+/**
+ * @brief Guards g_dmdevfs_mounts and every mount's ctx->drivers list against
+ *        concurrent access between the hot-plug worker thread and callers of
+ *        the dmfsi DIF functions (potentially arriving through dmvfs, which
+ *        holds its own mutex around the dispatch).
+ *
+ * Kept to the smallest possible critical sections and NEVER held across a
+ * DMOD_LOG_* call or a call into driver code: logging can end up writing to a
+ * file through dmvfs, which would need dmvfs's mutex while we hold ours - and
+ * a dmvfs-side caller blocked on this very mutex (already holding dmvfs's)
+ * would deadlock against it.
+ */
+static dmosi_mutex_t g_devfs_mutex = NULL;
+
+/**
+ * @brief Queue and worker thread that process hot-plug events out of MAL
+ *        callback context (see dmdrvi_device_available()/_unavailable())
+ */
+static dmosi_queue_t   g_hotplug_queue = NULL;
+static dmosi_process_t g_hotplug_process = NULL;
+static dmosi_thread_t  g_hotplug_thread = NULL;
+
 
 // ============================================================================
 //                      Local prototypes
@@ -118,6 +191,15 @@ static driver_node_t* get_next_driver_node( dmfsi_context_t ctx, driver_node_t* 
 
 static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path );
 static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t* stat );
+static bool dev_num_equal( const dmdrvi_dev_num_t* a, const dmdrvi_dev_num_t* b );
+static int compare_driver_context( const void* data, const void* user_data );
+static int compare_dynamic_device( const void* data, const void* user_data );
+static int compare_mount_context( const void* data, const void* user_data );
+static int compare_mount_owns_context( const void* data, const void* user_data );
+static int compare_mount_owns_dynamic_device( const void* data, const void* user_data );
+static void hotplug_worker_thread( void* arg );
+static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
+static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 
 // ============================================================================
 //                      Module Interface Implementation
@@ -136,7 +218,34 @@ void dmod_preinit(void)
  */
 int dmod_init(const Dmod_Config_t *Config)
 {
-    // Nothing to do
+    g_dmdevfs_mounts = dmlist_create(DMOD_MODULE_NAME);
+    g_devfs_mutex = dmosi_mutex_create(false);
+    g_hotplug_queue = dmosi_queue_create(sizeof(hotplug_event_t), DMDEVFS_HOTPLUG_QUEUE_LENGTH);
+    if (g_dmdevfs_mounts == NULL || g_devfs_mutex == NULL || g_hotplug_queue == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate hot-plug support resources\n");
+        return -1;
+    }
+
+    // Own process (rather than NULL/"current process") so the worker thread is
+    // grouped under an identity that actually represents it - not whatever
+    // process happened to be current on the thread that loaded this module.
+    g_hotplug_process = dmosi_process_create(DMDEVFS_HOTPLUG_THREAD_NAME, DMOD_MODULE_NAME, NULL);
+    if (g_hotplug_process == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to create hot-plug worker process\n");
+        return -1;
+    }
+
+    g_hotplug_thread = dmosi_thread_create(hotplug_worker_thread, NULL,
+        DMDEVFS_HOTPLUG_THREAD_PRIORITY, DMDEVFS_HOTPLUG_THREAD_STACK_SIZE,
+        DMDEVFS_HOTPLUG_THREAD_NAME, g_hotplug_process);
+    if (g_hotplug_thread == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to start hot-plug worker thread\n");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -145,7 +254,29 @@ int dmod_init(const Dmod_Config_t *Config)
  */
 int dmod_deinit(void)
 {
-    // Nothing to do
+    if (g_hotplug_thread != NULL)
+    {
+        // Wake the worker with a shutdown sentinel (context == NULL) and wait
+        // for it to exit before tearing down the resources it uses.
+        hotplug_event_t stop_event = { .context = NULL };
+        dmosi_queue_send(g_hotplug_queue, &stop_event, -1);
+        dmosi_thread_join(g_hotplug_thread);
+        dmosi_thread_destroy(g_hotplug_thread);
+        g_hotplug_thread = NULL;
+    }
+
+    if (g_hotplug_process != NULL)
+    {
+        dmosi_process_destroy(g_hotplug_process);
+        g_hotplug_process = NULL;
+    }
+
+    dmosi_queue_destroy(g_hotplug_queue);
+    g_hotplug_queue = NULL;
+    dmosi_mutex_destroy(g_devfs_mutex);
+    g_devfs_mutex = NULL;
+    dmlist_destroy(g_dmdevfs_mounts);
+    g_dmdevfs_mounts = NULL;
     return 0;
 }
 
@@ -191,7 +322,15 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
         Dmod_Free(ctx);
         return NULL;
     }
-    
+
+    dmosi_mutex_lock(g_devfs_mutex);
+    bool registered = dmlist_push_back(g_dmdevfs_mounts, ctx);
+    dmosi_mutex_unlock(g_devfs_mutex);
+    if (!registered)
+    {
+        DMOD_LOG_ERROR("Failed to register mount for hot-plug notifications\n");
+    }
+
     return ctx;
 }
 
@@ -213,6 +352,13 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _deinit, (dmfsi_context_t ctx
         DMOD_LOG_ERROR("Invalid context in deinit\n");
         return DMFSI_ERR_INVALID;
     }
+
+    // Deregister before tearing down ctx->drivers: once removed, the hot-plug
+    // worker thread can no longer find (or touch) this mount, so the rest of
+    // teardown below can safely run without holding g_devfs_mutex.
+    dmosi_mutex_lock(g_devfs_mutex);
+    dmlist_remove(g_dmdevfs_mounts, ctx, compare_mount_context);
+    dmosi_mutex_unlock(g_devfs_mutex);
 
     unconfigure_drivers(ctx);
     dmlist_destroy(ctx->drivers);
@@ -262,9 +408,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         return DMFSI_ERR_GENERAL;
     }
     
-    // Open the device through the driver
-    // Note: dmdrvi_open only takes context and flags, returns device handle
-    handle->driver_handle = dmdrvi_open(driver_node->driver_context, mode);
+    // Open the device through the driver, identifying which device within the
+    // context this is (the context's own device, or a hot-plugged sub-device)
+    handle->driver_handle = dmdrvi_open(driver_node->driver_context, mode, &driver_node->dev_num);
     if(handle->driver_handle == NULL)
     {
         DMOD_LOG_ERROR("Driver failed to open device: %s\n", path);
@@ -1080,6 +1226,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     DMOD_LOG_STEP_PROGRESS(75, "Creating driver context: %s\n", driver_name);
     driver_node->was_loaded = was_loaded;
     driver_node->was_enabled = was_enabled;
+    driver_node->is_dynamic = false;
     driver_node->driver = driver;
     driver_node->driver_context = dmdrvi_create(config_ctx, &driver_node->dev_num);
     if (driver_node->driver_context == NULL)
@@ -1368,13 +1515,19 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
         driver_node_t* driver_node = (driver_node_t*)dmlist_get(ctx->drivers, i);
         if (driver_node != NULL)
         {
-            dmod_dmdrvi_free_t dmdrvi_free = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_free_sig);
-            if (dmdrvi_free != NULL)
+            // Dynamic (hot-plugged) nodes share driver_context/driver with the node that
+            // owns them (created via dmdrvi_create) - only the owner may free the context
+            // or release the module, otherwise it would be freed/unloaded more than once.
+            if (!driver_node->is_dynamic)
             {
-                dmdrvi_free(driver_node->driver_context);
-                DMOD_LOG_INFO("Freed driver context for: %s\n", Dmod_GetName(driver_node->driver));
+                dmod_dmdrvi_free_t dmdrvi_free = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_free_sig);
+                if (dmdrvi_free != NULL)
+                {
+                    dmdrvi_free(driver_node->driver_context);
+                    DMOD_LOG_INFO("Freed driver context for: %s\n", Dmod_GetName(driver_node->driver));
+                }
+                cleanup_driver_module(Dmod_GetName(driver_node->driver), driver_node->was_loaded, driver_node->was_enabled);
             }
-            cleanup_driver_module(Dmod_GetName(driver_node->driver), driver_node->was_loaded, driver_node->was_enabled);
             Dmod_Free(driver_node);
         }
     }
@@ -1862,26 +2015,46 @@ static int compare_driver(const void* data, const void* user_data )
 
 /**
  * @brief Check if a path is a directory
+ *
+ * Locked: ctx->drivers may be concurrently mutated by the hot-plug worker
+ * thread (see dmdrvi_device_available()/_unavailable()).
  */
 static bool is_directory( dmfsi_context_t ctx, const char* path )
 {
-    return strcmp(path, ROOT_DIRECTORY_NAME) == 0 || dmlist_find(ctx->drivers, path, compare_driver_directory) != NULL;
+    if (strcmp(path, ROOT_DIRECTORY_NAME) == 0)
+    {
+        return true;
+    }
+    dmosi_mutex_lock(g_devfs_mutex);
+    bool found = dmlist_find(ctx->drivers, path, compare_driver_directory) != NULL;
+    dmosi_mutex_unlock(g_devfs_mutex);
+    return found;
 }
 
 /**
  * @brief Get the next driver node in a directory
+ *
+ * Locked: see is_directory().
  */
 static driver_node_t* get_next_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* path )
 {
-    return dmlist_find_next(ctx->drivers, current, path, compare_driver_directory);
+    dmosi_mutex_lock(g_devfs_mutex);
+    driver_node_t* next = (driver_node_t*)dmlist_find_next(ctx->drivers, current, path, compare_driver_directory);
+    dmosi_mutex_unlock(g_devfs_mutex);
+    return next;
 }
 
 /**
  * @brief Find a driver node by its path
+ *
+ * Locked: see is_directory().
  */
 static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path )
 {
-    return dmlist_find(ctx->drivers, path, compare_driver_node_path);
+    dmosi_mutex_lock(g_devfs_mutex);
+    driver_node_t* node = (driver_node_t*)dmlist_find(ctx->drivers, path, compare_driver_node_path);
+    dmosi_mutex_unlock(g_devfs_mutex);
+    return node;
 }
 
 /**
@@ -1902,4 +2075,295 @@ static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t*
     }
 
     return dmdrvi_stat(context->driver_context, path, stat);
+}
+
+/**
+ * @brief Compare two device numbers for equality
+ *
+ * Only the fields flagged as valid in `flags` are compared, matching how
+ * drivers report which of major/minor/alt_name they actually use.
+ */
+static bool dev_num_equal( const dmdrvi_dev_num_t* a, const dmdrvi_dev_num_t* b )
+{
+    if (a->flags != b->flags)
+    {
+        return false;
+    }
+    if ((a->flags & DMDRVI_NUM_MAJOR) != 0 && a->major != b->major)
+    {
+        return false;
+    }
+    if ((a->flags & DMDRVI_NUM_MINOR) != 0 && a->minor != b->minor)
+    {
+        return false;
+    }
+    if ((a->flags & DMDRVI_NUM_ALT_NAME) != 0 && strcmp(a->alt_name, b->alt_name) != 0)
+    {
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Compare a driver node's driver_context against a target dmdrvi_context_t
+ *
+ * Matches the node that originally called dmdrvi_create() as well as any
+ * dynamic (hot-plugged) nodes sharing that same context.
+ */
+static int compare_driver_context( const void* data, const void* user_data )
+{
+    const driver_node_t* node = (const driver_node_t*)data;
+    if (node == NULL || user_data == NULL)
+    {
+        return -1;
+    }
+    return (node->driver_context == (dmdrvi_context_t)user_data) ? 0 : -1;
+}
+
+/**
+ * @brief Compare a driver node against a (context, dev_num) lookup, matching
+ *        only dynamic (hot-plugged) nodes
+ */
+static int compare_dynamic_device( const void* data, const void* user_data )
+{
+    const driver_node_t* node = (const driver_node_t*)data;
+    const dynamic_device_lookup_t* lookup = (const dynamic_device_lookup_t*)user_data;
+    if (node == NULL || lookup == NULL || !node->is_dynamic)
+    {
+        return -1;
+    }
+    if (node->driver_context != lookup->context)
+    {
+        return -1;
+    }
+    return dev_num_equal(&node->dev_num, lookup->dev_num) ? 0 : -1;
+}
+
+/**
+ * @brief Compare a mount (dmfsi_context_t) against a target pointer
+ */
+static int compare_mount_context( const void* data, const void* user_data )
+{
+    return (data == user_data) ? 0 : -1;
+}
+
+/**
+ * @brief Match the mount (dmfsi_context_t) whose driver list contains a node
+ *        for the given dmdrvi_context_t
+ */
+static int compare_mount_owns_context( const void* data, const void* user_data )
+{
+    const struct dmfsi_context* mount = (const struct dmfsi_context*)data;
+    if (mount == NULL || user_data == NULL)
+    {
+        return -1;
+    }
+    return (dmlist_find(mount->drivers, user_data, compare_driver_context) != NULL) ? 0 : -1;
+}
+
+/**
+ * @brief Match the mount (dmfsi_context_t) whose driver list contains a
+ *        dynamic device for the given (context, dev_num) lookup
+ */
+static int compare_mount_owns_dynamic_device( const void* data, const void* user_data )
+{
+    const struct dmfsi_context* mount = (const struct dmfsi_context*)data;
+    if (mount == NULL || user_data == NULL)
+    {
+        return -1;
+    }
+    return (dmlist_find(mount->drivers, user_data, compare_dynamic_device) != NULL) ? 0 : -1;
+}
+
+/**
+ * @brief MAL implementation of dmdrvi_device_available()
+ *
+ * Called by a driver to announce that a new device (e.g. a hot-plugged
+ * sub-device or a dynamically discovered channel) became available within
+ * a driver context it previously created via dmdrvi_create(). Only queues the
+ * event for the hot-plug worker thread - see process_device_available() for
+ * the actual work - so the calling driver never blocks on it.
+ */
+void dmdrvi_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num )
+{
+    if (context == NULL || dev_num == NULL)
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_available: invalid arguments\n");
+        return;
+    }
+
+    hotplug_event_t event = { .context = context, .dev_num = *dev_num, .available = true };
+    if (dmosi_queue_send(g_hotplug_queue, &event, 0) != 0)
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_available: hot-plug queue full, event dropped\n");
+    }
+}
+
+/**
+ * @brief MAL implementation of dmdrvi_device_unavailable()
+ *
+ * Counterpart of dmdrvi_device_available(): queues removal of the device file
+ * exposed for a previously announced device. See process_device_unavailable().
+ */
+void dmdrvi_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num )
+{
+    if (context == NULL || dev_num == NULL)
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_unavailable: invalid arguments\n");
+        return;
+    }
+
+    hotplug_event_t event = { .context = context, .dev_num = *dev_num, .available = false };
+    if (dmosi_queue_send(g_hotplug_queue, &event, 0) != 0)
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_unavailable: hot-plug queue full, event dropped\n");
+    }
+}
+
+/**
+ * @brief Hot-plug worker thread entry point
+ *
+ * Blocks on the queue and dispatches each event to process_device_available()
+ * or process_device_unavailable(). Exits when it receives the shutdown
+ * sentinel (an event with context == NULL) sent by dmod_deinit().
+ */
+static void hotplug_worker_thread( void* arg )
+{
+    (void)arg;
+
+    for (;;)
+    {
+        hotplug_event_t event;
+        if (dmosi_queue_receive(g_hotplug_queue, &event, -1) != 0)
+        {
+            continue;
+        }
+        if (event.context == NULL)
+        {
+            break;
+        }
+
+        if (event.available)
+        {
+            process_device_available(event.context, &event.dev_num);
+        }
+        else
+        {
+            process_device_unavailable(event.context, &event.dev_num);
+        }
+    }
+}
+
+/**
+ * @brief Do the actual work for a queued dmdrvi_device_available() event
+ *
+ * Runs on the hot-plug worker thread, in two separately-locked steps so that
+ * read_driver_node_path() - which can itself call DMOD_LOG_ERROR() on failure -
+ * never runs while g_devfs_mutex is held:
+ *
+ *  1. Locked: look up the owning mount, reject duplicates, and copy out the
+ *     (stable, pointer-only) fields needed to build the new node.
+ *  2. Unlocked: allocate the node and compute its path (may log).
+ *  3. Locked again: re-validate the mount is still registered - if _deinit()
+ *     raced us and won, mount may now be a dangling pointer, so this check
+ *     must only ever compare it (never dereference it) until proven live -
+ *     and only then insert the node.
+ */
+static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+
+    dmfsi_context_t mount = (dmfsi_context_t)dmlist_find(g_dmdevfs_mounts, (void*)context, compare_mount_owns_context);
+    if (mount == NULL)
+    {
+        dmosi_mutex_unlock(g_devfs_mutex);
+        DMOD_LOG_ERROR("dmdrvi_device_available: driver context not registered with any dmdevfs mount\n");
+        return;
+    }
+
+    dynamic_device_lookup_t lookup = { .context = context, .dev_num = dev_num };
+    if (dmlist_find(mount->drivers, &lookup, compare_dynamic_device) != NULL)
+    {
+        dmosi_mutex_unlock(g_devfs_mutex);
+        DMOD_LOG_ERROR("dmdrvi_device_available: device already registered\n");
+        return;
+    }
+
+    driver_node_t* owner = (driver_node_t*)dmlist_find(mount->drivers, (void*)context, compare_driver_context);
+    dmdrvi_context_t owner_context = owner->driver_context;
+    Dmod_Context_t* owner_driver = owner->driver;
+
+    dmosi_mutex_unlock(g_devfs_mutex);
+
+    driver_node_t* new_node = Dmod_Malloc(sizeof(driver_node_t));
+    if (new_node == NULL)
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_available: failed to allocate device node\n");
+        return;
+    }
+
+    new_node->driver_context = owner_context;
+    new_node->driver = owner_driver;
+    new_node->dev_num = *dev_num;
+    new_node->was_loaded = false;
+    new_node->was_enabled = false;
+    new_node->is_dynamic = true;
+
+    if (read_driver_node_path(new_node, new_node->path, sizeof(new_node->path)) != 0)
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_available: failed to compute device path\n");
+        Dmod_Free(new_node);
+        return;
+    }
+
+    dmosi_mutex_lock(g_devfs_mutex);
+    bool mount_still_valid = dmlist_find(g_dmdevfs_mounts, mount, compare_mount_context) != NULL;
+    bool inserted = mount_still_valid && dmlist_push_back(mount->drivers, new_node);
+    dmosi_mutex_unlock(g_devfs_mutex);
+
+    if (!mount_still_valid)
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_available: mount was unmounted while processing event\n");
+        Dmod_Free(new_node);
+        return;
+    }
+    if (!inserted)
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_available: failed to register device node\n");
+        Dmod_Free(new_node);
+        return;
+    }
+
+    DMOD_LOG_INFO("Hot-plugged device now available: %s\n", new_node->path);
+}
+
+/**
+ * @brief Do the actual work for a queued dmdrvi_device_unavailable() event
+ *
+ * Runs on the hot-plug worker thread. See process_device_available() for the
+ * locking rationale.
+ */
+static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+
+    dynamic_device_lookup_t lookup = { .context = context, .dev_num = dev_num };
+    dmfsi_context_t mount = (dmfsi_context_t)dmlist_find(g_dmdevfs_mounts, &lookup, compare_mount_owns_dynamic_device);
+    if (mount == NULL)
+    {
+        dmosi_mutex_unlock(g_devfs_mutex);
+        DMOD_LOG_ERROR("dmdrvi_device_unavailable: device not registered with any dmdevfs mount\n");
+        return;
+    }
+
+    driver_node_t* node = (driver_node_t*)dmlist_find(mount->drivers, &lookup, compare_dynamic_device);
+    path_t removed_path;
+    strncpy(removed_path, node->path, sizeof(removed_path));
+    removed_path[sizeof(removed_path) - 1] = '\0';
+    dmlist_remove(mount->drivers, node, compare_driver);
+
+    dmosi_mutex_unlock(g_devfs_mutex);
+
+    Dmod_Free(node);
+    DMOD_LOG_INFO("Hot-plugged device no longer available: %s\n", removed_path);
 }

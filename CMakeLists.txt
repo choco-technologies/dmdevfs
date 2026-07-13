@@ -66,6 +66,10 @@ set(DMOD_AUTHOR_NAME        Patryk Kubiak)
 # Stack size for the module (should be integer)
 set(DMOD_STACK_SIZE         1024)
 
+# dmdevfs implements dmdrvi's Module Abstraction Layer (dmdrvi_device_available /
+# dmdrvi_device_unavailable) so drivers can announce hot-plugged sub-devices.
+set(DMOD_MAL_IMPLS         dmdrvi)
+
 #
 #   dmod_add_library - create a library module
 #   it has the same signature as add_library
@@ -83,6 +87,7 @@ dmod_link_modules(${DMOD_MODULE_NAME}
     dmdrvi
     dmini
     dmlist
+    dmosi
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
