@@ -593,6 +593,41 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _lseek, (dmfsi_context_t ctx
 }
 
 /**
+ * @brief Perform I/O control operation
+ */
+dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx, void* fp, int request, void* arg) )
+{
+    if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
+    {
+        DMOD_LOG_ERROR("Invalid context in ioctl\n");
+        return DMFSI_ERR_INVALID;
+    }
+
+    if(fp == NULL)
+    {
+        return DMFSI_ERR_INVALID;
+    }
+
+    file_handle_t* handle = (file_handle_t*)fp;
+
+    // Get the dmdrvi_ioctl function
+    dmod_dmdrvi_ioctl_t dmdrvi_ioctl = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_ioctl_sig);
+    if(dmdrvi_ioctl == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_ioctl\n");
+        return DMFSI_ERR_NOT_FOUND;
+    }
+
+    int result = dmdrvi_ioctl(handle->driver->driver_context, handle->driver_handle, request, arg);
+    if(result != 0)
+    {
+        return DMFSI_ERR_GENERAL;
+    }
+
+    return DMFSI_OK;
+}
+
+/**
  * @brief Get current position in a file
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx, void* fp) )
