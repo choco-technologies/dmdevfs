@@ -197,6 +197,8 @@ static int compare_dynamic_device( const void* data, const void* user_data );
 static int compare_mount_context( const void* data, const void* user_data );
 static int compare_mount_owns_context( const void* data, const void* user_data );
 static int compare_mount_owns_dynamic_device( const void* data, const void* user_data );
+static int compare_driver_context_and_dev_num( const void* data, const void* user_data );
+static int compare_mount_owns_device( const void* data, const void* user_data );
 static void hotplug_worker_thread( void* arg );
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
@@ -2211,6 +2213,40 @@ static int compare_mount_owns_dynamic_device( const void* data, const void* user
 }
 
 /**
+ * @brief Compare a driver node against a (context, dev_num) lookup, matching
+ *        any node - the one created via dmdrvi_create() as well as dynamic
+ *        (hot-plugged) ones - whose driver_context and dev_num both match
+ */
+static int compare_driver_context_and_dev_num( const void* data, const void* user_data )
+{
+    const driver_node_t* node = (const driver_node_t*)data;
+    const dynamic_device_lookup_t* lookup = (const dynamic_device_lookup_t*)user_data;
+    if (node == NULL || lookup == NULL)
+    {
+        return -1;
+    }
+    if (node->driver_context != lookup->context)
+    {
+        return -1;
+    }
+    return dev_num_equal(&node->dev_num, lookup->dev_num) ? 0 : -1;
+}
+
+/**
+ * @brief Match the mount (dmfsi_context_t) whose driver list contains the
+ *        device identified by the given (context, dev_num) lookup
+ */
+static int compare_mount_owns_device( const void* data, const void* user_data )
+{
+    const struct dmfsi_context* mount = (const struct dmfsi_context*)data;
+    if (mount == NULL || user_data == NULL)
+    {
+        return -1;
+    }
+    return (dmlist_find(mount->drivers, user_data, compare_driver_context_and_dev_num) != NULL) ? 0 : -1;
+}
+
+/**
  * @brief MAL implementation of dmdrvi_device_available()
  *
  * Called by a driver to announce that a new device (e.g. a hot-plugged
@@ -2253,6 +2289,66 @@ void dmdrvi_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t
     {
         DMOD_LOG_ERROR("dmdrvi_device_unavailable: hot-plug queue full, event dropped\n");
     }
+}
+
+/**
+ * @brief MAL implementation of dmdrvi_get_path()
+ *
+ * Called by a driver to ask for the absolute path under which one of its
+ * devices is exposed. The device's path relative to this dmdevfs mount's own
+ * root is already known (driver_node_t::path); the mount's own absolute
+ * location is not - it is owned by whoever mounted this dmdevfs instance
+ * (typically dmvfs) - so it is retrieved via dmfsi_get_mount_path().
+ */
+int dmdrvi_get_path( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num, char* path_buffer, size_t buffer_size )
+{
+    if (context == NULL || dev_num == NULL || path_buffer == NULL || buffer_size == 0)
+    {
+        DMOD_LOG_ERROR("dmdrvi_get_path: invalid arguments\n");
+        return -1;
+    }
+
+    dynamic_device_lookup_t lookup = { .context = context, .dev_num = dev_num };
+
+    dmosi_mutex_lock(g_devfs_mutex);
+
+    dmfsi_context_t mount = (dmfsi_context_t)dmlist_find(g_dmdevfs_mounts, &lookup, compare_mount_owns_device);
+    if (mount == NULL)
+    {
+        dmosi_mutex_unlock(g_devfs_mutex);
+        DMOD_LOG_ERROR("dmdrvi_get_path: device not registered with any dmdevfs mount\n");
+        return -1;
+    }
+
+    driver_node_t* node = (driver_node_t*)dmlist_find(mount->drivers, &lookup, compare_driver_context_and_dev_num);
+
+    path_t node_path;
+    strncpy(node_path, node->path, sizeof(node_path));
+    node_path[sizeof(node_path) - 1] = '\0';
+
+    dmosi_mutex_unlock(g_devfs_mutex);
+
+    // Unlocked: dmfsi_get_mount_path() calls into another module (e.g. dmvfs)
+    // and must not run while g_devfs_mutex is held.
+    path_t mount_path;
+    if (dmfsi_get_mount_path(mount, mount_path, sizeof(mount_path)) != DMFSI_OK)
+    {
+        DMOD_LOG_ERROR("dmdrvi_get_path: failed to resolve dmdevfs mount path\n");
+        return -1;
+    }
+
+    bool mount_is_root = (strcmp(mount_path, ROOT_DIRECTORY_NAME) == 0);
+    int written = mount_is_root
+        ? Dmod_SnPrintf(path_buffer, buffer_size, "%s", node_path)
+        : Dmod_SnPrintf(path_buffer, buffer_size, "%s%s", mount_path, node_path);
+
+    if (written < 0 || (size_t)written >= buffer_size)
+    {
+        DMOD_LOG_ERROR("dmdrvi_get_path: path buffer too small\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 /**
