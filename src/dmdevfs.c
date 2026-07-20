@@ -88,6 +88,20 @@ typedef struct
 } hotplug_event_t;
 
 /**
+ * @brief Reference-counted wrapper around one discovered config file's parsed
+ *        INI context. A single file can yield several pending_driver_t entries
+ *        (one per [section] declaring its own driver_name), so the underlying
+ *        dmini_context_t can only be freed once none of them need it anymore -
+ *        this tracks that, so it can happen as each entry finishes instead of
+ *        only at the very end of the whole /configs walk.
+ */
+typedef struct
+{
+    dmini_context_t ctx;    // NULL once already destroyed
+    int refcount;           // Number of pending_driver_t entries still referencing ctx
+} config_file_entry_t;
+
+/**
  * @brief A driver configuration discovered while walking the config tree, waiting
  *        to be applied. Configuration is deferred so that `driver_order` and
  *        inter-module dependencies (as reported by dmod) can be resolved across
@@ -98,7 +112,8 @@ typedef struct
     char module_name[DMOD_MAX_MODULE_NAME_LENGTH];   // Driver module to configure
     char section_name[DMOD_MAX_MODULE_NAME_LENGTH];  // Section within config_ctx (only if has_section)
     bool has_section;                                // Whether section_name is a real INI section
-    dmini_context_t config_ctx;                       // INI context (owned by the config file, not by this entry)
+    dmini_context_t config_ctx;                       // INI context (owned by file_entry, not by this entry)
+    config_file_entry_t* file_entry;                  // Shared config file this entry was queued from
     int driver_order;                                 // Explicit ordering group (default 0)
     bool configured;                                  // Already turned into a driver_node_t
     bool configuring;                                 // Cycle guard while resolving dependencies
@@ -125,8 +140,6 @@ struct dmfsi_context
     uint32_t    magic;
     char* config_path;          // Path with the configuration files
     dmlist_context_t* drivers;  // List of loaded drivers
-    bool ready;                 // True once dmfsi_dmdevfs_mounted() has been called by the mounter
-    path_t mount_path;          // This mount's own absolute path, valid once `ready` is true
 };
 
 /**
@@ -167,8 +180,9 @@ static dmosi_thread_t  g_hotplug_thread = NULL;
 // ============================================================================
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path);
 static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* config_files, const char* driver_name, const char* config_path);
-static int collect_section_driver_configs(dmlist_context_t* pending, dmini_context_t config_ctx);
-static bool add_pending_driver(dmlist_context_t* pending, const char* module_name, dmini_context_t config_ctx, const char* section_name, int driver_order);
+static int collect_section_driver_configs(dmlist_context_t* pending, config_file_entry_t* file_entry);
+static bool add_pending_driver(dmlist_context_t* pending, const char* module_name, config_file_entry_t* file_entry, const char* section_name, int driver_order);
+static void release_config_file_ref(config_file_entry_t* file_entry);
 static int configure_pending_drivers(dmfsi_context_t ctx, dmlist_context_t* pending);
 static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry);
 static bool configure_required_dependencies(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry);
@@ -199,9 +213,6 @@ static int compare_dynamic_device( const void* data, const void* user_data );
 static int compare_mount_context( const void* data, const void* user_data );
 static int compare_mount_owns_context( const void* data, const void* user_data );
 static int compare_mount_owns_dynamic_device( const void* data, const void* user_data );
-static int build_absolute_path( const char* mount_path, const char* node_path, char* out, size_t out_size );
-static void notify_driver_path_ready( const char* mount_path, driver_node_t* node );
-static bool notify_all_drivers_path_ready( void* data, void* user_data );
 static void hotplug_worker_thread( void* arg );
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
@@ -316,38 +327,24 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     ctx->magic = DMDEVFS_CONTEXT_MAGIC;
     ctx->config_path = Dmod_StrDup(config);
     ctx->drivers = dmlist_create(DMOD_MODULE_NAME);
-    ctx->ready = false;
-    ctx->mount_path[0] = '\0';
+    
+    int res = configure_drivers(ctx, NULL, ctx->config_path);
+    if (res != DMFSI_OK)
+    {
+        DMOD_LOG_ERROR("Failed to configure drivers\n");
+        unconfigure_drivers(ctx);
+        dmlist_destroy(ctx->drivers);
+        Dmod_Free(ctx->config_path);
+        Dmod_Free(ctx);
+        return NULL;
+    }
 
-    // Registered before configuring any driver (rather than after, as
-    // before) so that dmdrvi_device_available()/_unavailable() can find this
-    // mount even while a driver's own dmdrvi_create() is still running as
-    // part of configure_drivers() below.
     dmosi_mutex_lock(g_devfs_mutex);
     bool registered = dmlist_push_back(g_dmdevfs_mounts, ctx);
     dmosi_mutex_unlock(g_devfs_mutex);
     if (!registered)
     {
         DMOD_LOG_ERROR("Failed to register mount for hot-plug notifications\n");
-    }
-
-    int res = configure_drivers(ctx, NULL, ctx->config_path);
-    if (res != DMFSI_OK)
-    {
-        DMOD_LOG_ERROR("Failed to configure drivers\n");
-        unconfigure_drivers(ctx);
-
-        if (registered)
-        {
-            dmosi_mutex_lock(g_devfs_mutex);
-            dmlist_remove(g_dmdevfs_mounts, ctx, compare_mount_context);
-            dmosi_mutex_unlock(g_devfs_mutex);
-        }
-
-        dmlist_destroy(ctx->drivers);
-        Dmod_Free(ctx->config_path);
-        Dmod_Free(ctx);
-        return NULL;
     }
 
     return ctx;
@@ -1141,10 +1138,18 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
     }
     dmlist_destroy(pending);
 
+    // Most config files were already freed as their last referencing pending
+    // entry finished (see release_config_file_ref()) - this only catches the
+    // rare leftover (e.g. a file whose driver never got queued at all).
     size_t config_files_count = dmlist_size(config_files);
     for (size_t i = 0; i < config_files_count; i++)
     {
-        dmini_destroy((dmini_context_t)dmlist_get(config_files, i));
+        config_file_entry_t* file_entry = (config_file_entry_t*)dmlist_get(config_files, i);
+        if (file_entry->ctx != NULL)
+        {
+            dmini_destroy(file_entry->ctx);
+        }
+        Dmod_Free(file_entry);
     }
     dmlist_destroy(config_files);
 
@@ -1155,10 +1160,11 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
  * @brief Walk the config tree, queuing every driver configuration it finds
  *
  * This mirrors the directory traversal that used to configure drivers
- * immediately, except it only records what needs to be configured. The INI
- * contexts are kept alive in `config_files` until the whole tree has been
- * queued and configured, since a single file's context may still be needed
- * later on (e.g. as a dependency of a driver queued elsewhere).
+ * immediately, except it only records what needs to be configured. Each
+ * discovered file's INI context is wrapped in a ref-counted config_file_entry_t
+ * (one reference per pending_driver_t queued from it) so it can be freed via
+ * release_config_file_ref() as soon as the last such entry is configured,
+ * instead of every file staying alive until the whole tree is done.
  */
 static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* config_files, const char* driver_name, const char* config_path)
 {
@@ -1202,21 +1208,32 @@ static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* c
                 continue;
             }
 
-            if (!dmlist_push_back(config_files, config_ctx))
+            config_file_entry_t* file_entry = Dmod_Malloc(sizeof(config_file_entry_t));
+            if (file_entry == NULL)
+            {
+                DMOD_LOG_ERROR("Failed to allocate config file entry for: %s\n", full_path);
+                dmini_destroy(config_ctx);
+                continue;
+            }
+            file_entry->ctx = config_ctx;
+            file_entry->refcount = 0;
+
+            if (!dmlist_push_back(config_files, file_entry))
             {
                 DMOD_LOG_ERROR("Failed to track config context for: %s\n", full_path);
                 dmini_destroy(config_ctx);
+                Dmod_Free(file_entry);
                 continue;
             }
 
             // Section-specific driver_name entries take priority over the file/directory
             // derived driver name. Only queue the main driver when no section-level
             // drivers are present in the file.
-            int section_drivers_added = collect_section_driver_configs(pending, config_ctx);
+            int section_drivers_added = collect_section_driver_configs(pending, file_entry);
             if (section_drivers_added == 0)
             {
                 int driver_order = dmini_get_int(config_ctx, INI_MAIN_SECTION, "driver_order", 0);
-                if (!add_pending_driver(pending, module_name, config_ctx, NULL, driver_order))
+                if (!add_pending_driver(pending, module_name, file_entry, NULL, driver_order))
                 {
                     DMOD_LOG_ERROR("Failed to queue driver configuration: %s\n", module_name);
                 }
@@ -1337,9 +1354,10 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
  * A non-zero return value signals to the caller that the file is a multi-driver
  * config and no fallback main driver should be queued.
  */
-static int collect_section_driver_configs(dmlist_context_t* pending, dmini_context_t config_ctx)
+static int collect_section_driver_configs(dmlist_context_t* pending, config_file_entry_t* file_entry)
 {
     int num_added = 0;
+    dmini_context_t config_ctx = file_entry->ctx;
     int section_count = dmini_section_count(config_ctx);
 
     for (int i = 0; i < section_count; i++)
@@ -1357,7 +1375,7 @@ static int collect_section_driver_configs(dmlist_context_t* pending, dmini_conte
 
         int driver_order = dmini_get_int(config_ctx, section_name, "driver_order", 0);
 
-        if (add_pending_driver(pending, drv_name, config_ctx, section_name, driver_order))
+        if (add_pending_driver(pending, drv_name, file_entry, section_name, driver_order))
         {
             num_added++;
         }
@@ -1378,7 +1396,7 @@ static int collect_section_driver_configs(dmlist_context_t* pending, dmini_conte
  * stable insertion so entries that share the same driver_order stay in the
  * order they were discovered while walking the config tree.
  */
-static bool add_pending_driver(dmlist_context_t* pending, const char* module_name, dmini_context_t config_ctx, const char* section_name, int driver_order)
+static bool add_pending_driver(dmlist_context_t* pending, const char* module_name, config_file_entry_t* file_entry, const char* section_name, int driver_order)
 {
     pending_driver_t* new_entry = Dmod_Malloc(sizeof(pending_driver_t));
     if (new_entry == NULL)
@@ -1390,7 +1408,8 @@ static bool add_pending_driver(dmlist_context_t* pending, const char* module_nam
     memset(new_entry, 0, sizeof(*new_entry));
     strncpy(new_entry->module_name, module_name, sizeof(new_entry->module_name));
     new_entry->module_name[sizeof(new_entry->module_name) - 1] = '\0';
-    new_entry->config_ctx = config_ctx;
+    new_entry->config_ctx = file_entry->ctx;
+    new_entry->file_entry = file_entry;
     new_entry->driver_order = driver_order;
     if (section_name != NULL)
     {
@@ -1417,7 +1436,26 @@ static bool add_pending_driver(dmlist_context_t* pending, const char* module_nam
         return false;
     }
 
+    file_entry->refcount++;
     return true;
+}
+
+/**
+ * @brief Drop this pending entry's reference to its config file, freeing the
+ *        underlying dmini_context_t once the last entry sharing it is done
+ *        (see config_file_entry_t), instead of waiting for the whole
+ *        /configs walk to finish.
+ */
+static void release_config_file_ref(config_file_entry_t* file_entry)
+{
+    if (file_entry == NULL) return;
+
+    file_entry->refcount--;
+    if (file_entry->refcount <= 0 && file_entry->ctx != NULL)
+    {
+        dmini_destroy(file_entry->ctx);
+        file_entry->ctx = NULL;
+    }
 }
 
 /**
@@ -1467,6 +1505,7 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     if (!deps_ok)
     {
         DMOD_LOG_ERROR("Failed to configure driver: %s\n", entry->module_name);
+        release_config_file_ref(entry->file_entry);
         return false;
     }
 
@@ -1490,6 +1529,7 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     if (driver_node == NULL)
     {
         DMOD_LOG_ERROR("Failed to configure driver: %s\n", entry->module_name);
+        release_config_file_ref(entry->file_entry);
         return false;
     }
 
@@ -1497,28 +1537,12 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     {
         DMOD_LOG_ERROR("Failed to add driver to list: %s\n", entry->module_name);
         Dmod_Free(driver_node);
+        release_config_file_ref(entry->file_entry);
         return false;
     }
 
-    // Only true if this driver is configured into an already-mounted
-    // instance rather than during the initial _init() (e.g. a future
-    // runtime-added configuration) - dmfsi_dmdevfs_mounted() handles the
-    // initial batch once the mount itself becomes ready.
-    dmosi_mutex_lock(g_devfs_mutex);
-    bool ready = ctx->ready;
-    path_t mount_path;
-    if (ready)
-    {
-        strncpy(mount_path, ctx->mount_path, sizeof(mount_path));
-        mount_path[sizeof(mount_path) - 1] = '\0';
-    }
-    dmosi_mutex_unlock(g_devfs_mutex);
-    if (ready)
-    {
-        notify_driver_path_ready(mount_path, driver_node);
-    }
-
     entry->configured = true;
+    release_config_file_ref(entry->file_entry);
     return true;
 }
 
@@ -2293,100 +2317,6 @@ void dmdrvi_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t
 }
 
 /**
- * @brief Combine this mount's own absolute path with a path relative to it
- *
- * Used by notify_driver_path_ready() to build the path pushed to a driver.
- *
- * @return 0 on success, negative value on failure (buffer too small)
- */
-static int build_absolute_path( const char* mount_path, const char* node_path, char* out, size_t out_size )
-{
-    bool mount_is_root = (strcmp(mount_path, ROOT_DIRECTORY_NAME) == 0);
-    int written = mount_is_root
-        ? Dmod_SnPrintf(out, out_size, "%s", node_path)
-        : Dmod_SnPrintf(out, out_size, "%s%s", mount_path, node_path);
-
-    if (written < 0 || (size_t)written >= out_size)
-    {
-        DMOD_LOG_ERROR("build_absolute_path: path buffer too small\n");
-        return -1;
-    }
-
-    return 0;
-}
-
-/**
- * @brief Push a device's now-known absolute path to its driver, if implemented
- *
- * Called once dmdevfs itself is ready (mount->ready) and `node` is
- * registered - either while flushing already-registered devices from
- * dmfsi_dmdevfs_mounted(), or immediately upon registering a device that
- * arrives after dmdevfs is already mounted (hot-plug, or any future
- * runtime-added driver configuration).
- *
- * Must be called without g_devfs_mutex held: it calls into the driver's own
- * dif implementation.
- */
-static void notify_driver_path_ready( const char* mount_path, driver_node_t* node )
-{
-    dmod_dmdrvi_path_ready_t path_ready = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_path_ready_sig);
-    if (path_ready == NULL)
-    {
-        return;
-    }
-
-    path_t abs_path;
-    if (build_absolute_path(mount_path, node->path, abs_path, sizeof(abs_path)) != 0)
-    {
-        DMOD_LOG_ERROR("notify_driver_path_ready: failed to build absolute path for %s\n", node->path);
-        return;
-    }
-
-    path_ready(node->driver_context, &node->dev_num, abs_path);
-}
-
-/**
- * @brief dmlist_foreach() callback pushing the path to every already-registered driver
- */
-static bool notify_all_drivers_path_ready( void* data, void* user_data )
-{
-    notify_driver_path_ready((const char*)user_data, (driver_node_t*)data);
-    return true;
-}
-
-/**
- * @brief DIF implementation of dmfsi_mounted()
- *
- * Called by the mounter (e.g. dmvfs) once this mount is fully registered,
- * handing this mount's own absolute path directly. Caches it, marks the
- * mount ready, and flushes the path to every driver already configured
- * during _init() (which ran before this mount could be resolved). Any driver
- * registered afterwards (hot-plug, or a future runtime-added configuration)
- * is instead notified immediately at registration time - see
- * configure_pending_entry() and process_device_available().
- */
-dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, void, _mounted, (dmfsi_context_t ctx, const char* mount_path) )
-{
-    if (dmfsi_dmdevfs_context_is_valid(ctx) == 0 || mount_path == NULL)
-    {
-        DMOD_LOG_ERROR("Invalid arguments in mounted\n");
-        return;
-    }
-
-    dmosi_mutex_lock(g_devfs_mutex);
-    strncpy(ctx->mount_path, mount_path, sizeof(ctx->mount_path));
-    ctx->mount_path[sizeof(ctx->mount_path) - 1] = '\0';
-    ctx->ready = true;
-    dmosi_mutex_unlock(g_devfs_mutex);
-
-    // Unlocked: notify_driver_path_ready() calls into driver code, so it
-    // must not run while g_devfs_mutex is held. The list itself is not
-    // mutated here, only iterated - concurrent hot-plug insertions are
-    // handled by process_device_available() directly.
-    dmlist_foreach(ctx->drivers, notify_all_drivers_path_ready, ctx->mount_path);
-}
-
-/**
  * @brief Hot-plug worker thread entry point
  *
  * Blocks on the queue and dispatches each event to process_device_available()
@@ -2485,15 +2415,6 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     dmosi_mutex_lock(g_devfs_mutex);
     bool mount_still_valid = dmlist_find(g_dmdevfs_mounts, mount, compare_mount_context) != NULL;
     bool inserted = mount_still_valid && dmlist_push_back(mount->drivers, new_node);
-    // Captured under lock, alongside mount_still_valid: mount must not be
-    // dereferenced again once we can no longer prove it is still live.
-    bool mount_ready = mount_still_valid && mount->ready;
-    path_t mount_path;
-    if (mount_ready)
-    {
-        strncpy(mount_path, mount->mount_path, sizeof(mount_path));
-        mount_path[sizeof(mount_path) - 1] = '\0';
-    }
     dmosi_mutex_unlock(g_devfs_mutex);
 
     if (!mount_still_valid)
@@ -2507,14 +2428,6 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
         DMOD_LOG_ERROR("dmdrvi_device_available: failed to register device node\n");
         Dmod_Free(new_node);
         return;
-    }
-
-    // Only true for a device announced after dmdevfs itself is already
-    // mounted (the normal hot-plug case) - a device announced while dmdevfs
-    // is still being mounted is instead flushed by dmfsi_dmdevfs_mounted().
-    if (mount_ready)
-    {
-        notify_driver_path_ready(mount_path, new_node);
     }
 
     DMOD_LOG_INFO("Hot-plugged device now available: %s\n", new_node->path);
