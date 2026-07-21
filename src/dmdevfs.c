@@ -33,8 +33,12 @@
  * event and return - the actual work (searching/mutating the driver list) is
  * done on this dedicated thread, so a driver announcing a hot-plug event never
  * blocks on dmdevfs-internal bookkeeping.
+ *
+ * Pending events are kept in a dmlist_context_t (g_hotplug_events) rather than
+ * a fixed-length queue, so a burst of hot-plug notifications can no longer
+ * overflow a hard capacity and get silently dropped - it only fails if the
+ * per-event allocation itself fails.
  */
-#define DMDEVFS_HOTPLUG_QUEUE_LENGTH        8
 #define DMDEVFS_HOTPLUG_THREAD_PRIORITY     1
 #define DMDEVFS_HOTPLUG_THREAD_STACK_SIZE   (512 + DMOSI_THREAD_STACK_OVERHEAD)
 #define DMDEVFS_HOTPLUG_THREAD_NAME         "dmdevfs_hotplug"
@@ -171,10 +175,20 @@ static dmosi_mutex_t g_devfs_mutex = NULL;
 /**
  * @brief Queue and worker thread that process hot-plug events out of MAL
  *        callback context (see dmdrvi_device_available()/_unavailable())
+ *
+ * g_hotplug_events holds pending hotplug_event_t* entries (FIFO via
+ * dmlist_push_back()/dmlist_pop_front()) and is guarded by g_hotplug_mutex,
+ * since dmlist itself is not thread-safe and entries are pushed from
+ * whichever thread a driver calls dmdrvi_device_available()/_unavailable()
+ * from while they're popped on g_hotplug_thread. g_hotplug_semaphore has one
+ * count per pending entry, so the worker thread can block until there is
+ * something to do instead of polling the list.
  */
-static dmosi_queue_t   g_hotplug_queue = NULL;
-static dmosi_process_t g_hotplug_process = NULL;
-static dmosi_thread_t  g_hotplug_thread = NULL;
+static dmlist_context_t*  g_hotplug_events    = NULL;
+static dmosi_mutex_t      g_hotplug_mutex     = NULL;
+static dmosi_semaphore_t  g_hotplug_semaphore = NULL;
+static dmosi_process_t    g_hotplug_process   = NULL;
+static dmosi_thread_t     g_hotplug_thread    = NULL;
 
 
 // ============================================================================
@@ -219,6 +233,7 @@ static int build_absolute_path( const char* mount_path, const char* node_path, c
 static void notify_driver_path_ready( const char* mount_path, driver_node_t* node );
 static bool notify_all_drivers_path_ready( void* data, void* user_data );
 static void hotplug_worker_thread( void* arg );
+static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num, bool available );
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 
@@ -239,10 +254,13 @@ void dmod_preinit(void)
  */
 int dmod_init(const Dmod_Config_t *Config)
 {
-    g_dmdevfs_mounts = dmlist_create(DMOD_MODULE_NAME);
-    g_devfs_mutex = dmosi_mutex_create(false);
-    g_hotplug_queue = dmosi_queue_create(sizeof(hotplug_event_t), DMDEVFS_HOTPLUG_QUEUE_LENGTH);
-    if (g_dmdevfs_mounts == NULL || g_devfs_mutex == NULL || g_hotplug_queue == NULL)
+    g_dmdevfs_mounts    = dmlist_create(DMOD_MODULE_NAME);
+    g_devfs_mutex       = dmosi_mutex_create(false);
+    g_hotplug_events    = dmlist_create(DMOD_MODULE_NAME);
+    g_hotplug_mutex     = dmosi_mutex_create(false);
+    g_hotplug_semaphore = dmosi_semaphore_create(0, UINT32_MAX);
+    if (g_dmdevfs_mounts == NULL || g_devfs_mutex == NULL || g_hotplug_events == NULL ||
+        g_hotplug_mutex == NULL || g_hotplug_semaphore == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate hot-plug support resources\n");
         return -1;
@@ -279,8 +297,16 @@ int dmod_deinit(void)
     {
         // Wake the worker with a shutdown sentinel (context == NULL) and wait
         // for it to exit before tearing down the resources it uses.
-        hotplug_event_t stop_event = { .context = NULL };
-        dmosi_queue_send(g_hotplug_queue, &stop_event, -1);
+        hotplug_event_t* stop_event = Dmod_Malloc(sizeof(hotplug_event_t));
+        if (stop_event != NULL)
+        {
+            stop_event->context = NULL;
+
+            dmosi_mutex_lock(g_hotplug_mutex);
+            dmlist_push_back(g_hotplug_events, stop_event);
+            dmosi_mutex_unlock(g_hotplug_mutex);
+            dmosi_semaphore_post(g_hotplug_semaphore, 1);
+        }
         dmosi_thread_join(g_hotplug_thread);
         dmosi_thread_destroy(g_hotplug_thread);
         g_hotplug_thread = NULL;
@@ -292,8 +318,12 @@ int dmod_deinit(void)
         g_hotplug_process = NULL;
     }
 
-    dmosi_queue_destroy(g_hotplug_queue);
-    g_hotplug_queue = NULL;
+    dmlist_destroy(g_hotplug_events);
+    g_hotplug_events = NULL;
+    dmosi_semaphore_destroy(g_hotplug_semaphore);
+    g_hotplug_semaphore = NULL;
+    dmosi_mutex_destroy(g_hotplug_mutex);
+    g_hotplug_mutex = NULL;
     dmosi_mutex_destroy(g_devfs_mutex);
     g_devfs_mutex = NULL;
     dmlist_destroy(g_dmdevfs_mounts);
@@ -2309,6 +2339,43 @@ static int compare_mount_owns_dynamic_device( const void* data, const void* user
 }
 
 /**
+ * @brief Append one hot-plug event to g_hotplug_events and wake the worker
+ *
+ * The event is heap-allocated because dmlist stores pointers rather than
+ * copying elements by value, unlike the fixed-size dmosi_queue_t this used
+ * to be. That also means the queue only fails to grow if the allocation
+ * itself fails (true OOM) - a burst of hot-plug notifications can no longer
+ * overflow a hard-coded queue length and get silently dropped.
+ *
+ * @return true if the event was queued, false on allocation failure.
+ */
+static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num, bool available )
+{
+    hotplug_event_t* event = Dmod_Malloc(sizeof(hotplug_event_t));
+    if (event == NULL)
+    {
+        return false;
+    }
+
+    event->context = context;
+    event->dev_num = *dev_num;
+    event->available = available;
+
+    dmosi_mutex_lock(g_hotplug_mutex);
+    bool queued = dmlist_push_back(g_hotplug_events, event);
+    dmosi_mutex_unlock(g_hotplug_mutex);
+
+    if (!queued)
+    {
+        Dmod_Free(event);
+        return false;
+    }
+
+    dmosi_semaphore_post(g_hotplug_semaphore, 1);
+    return true;
+}
+
+/**
  * @brief MAL implementation of dmdrvi_device_available()
  *
  * Called by a driver to announce that a new device (e.g. a hot-plugged
@@ -2325,10 +2392,9 @@ void dmdrvi_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* 
         return;
     }
 
-    hotplug_event_t event = { .context = context, .dev_num = *dev_num, .available = true };
-    if (dmosi_queue_send(g_hotplug_queue, &event, 0) != 0)
+    if (!queue_hotplug_event(context, dev_num, true))
     {
-        DMOD_LOG_ERROR("dmdrvi_device_available: hot-plug queue full, event dropped\n");
+        DMOD_LOG_ERROR("dmdrvi_device_available: failed to allocate hot-plug event, event dropped\n");
     }
 }
 
@@ -2346,10 +2412,9 @@ void dmdrvi_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t
         return;
     }
 
-    hotplug_event_t event = { .context = context, .dev_num = *dev_num, .available = false };
-    if (dmosi_queue_send(g_hotplug_queue, &event, 0) != 0)
+    if (!queue_hotplug_event(context, dev_num, false))
     {
-        DMOD_LOG_ERROR("dmdrvi_device_unavailable: hot-plug queue full, event dropped\n");
+        DMOD_LOG_ERROR("dmdrvi_device_unavailable: failed to allocate hot-plug event, event dropped\n");
     }
 }
 
@@ -2450,9 +2515,11 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, void, _mounted, (dmfsi_context_t c
 /**
  * @brief Hot-plug worker thread entry point
  *
- * Blocks on the queue and dispatches each event to process_device_available()
- * or process_device_unavailable(). Exits when it receives the shutdown
- * sentinel (an event with context == NULL) sent by dmod_deinit().
+ * Blocks on g_hotplug_semaphore until queue_hotplug_event() (or the shutdown
+ * path in dmod_deinit()) posts one, then pops the oldest entry off
+ * g_hotplug_events and dispatches it to process_device_available() or
+ * process_device_unavailable(). Exits when it pops the shutdown sentinel
+ * (an event with context == NULL) sent by dmod_deinit().
  */
 static void hotplug_worker_thread( void* arg )
 {
@@ -2460,24 +2527,35 @@ static void hotplug_worker_thread( void* arg )
 
     for (;;)
     {
-        hotplug_event_t event;
-        if (dmosi_queue_receive(g_hotplug_queue, &event, -1) != 0)
+        if (dmosi_semaphore_wait(g_hotplug_semaphore, 1, -1) != 0)
         {
             continue;
         }
-        if (event.context == NULL)
+
+        dmosi_mutex_lock(g_hotplug_mutex);
+        hotplug_event_t* event = (hotplug_event_t*)dmlist_pop_front(g_hotplug_events);
+        dmosi_mutex_unlock(g_hotplug_mutex);
+
+        if (event == NULL)
         {
+            continue;
+        }
+        if (event->context == NULL)
+        {
+            Dmod_Free(event);
             break;
         }
 
-        if (event.available)
+        if (event->available)
         {
-            process_device_available(event.context, &event.dev_num);
+            process_device_available(event->context, &event->dev_num);
         }
         else
         {
-            process_device_unavailable(event.context, &event.dev_num);
+            process_device_unavailable(event->context, &event->dev_num);
         }
+
+        Dmod_Free(event);
     }
 }
 
