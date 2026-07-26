@@ -27,6 +27,17 @@
 #define INI_MAIN_SECTION "main"
 
 /**
+ * @brief Name (and resulting root-level path) of the built-in null device
+ *
+ * Exposed unconditionally on every dmdevfs mount, without any configuration
+ * file - reads report EOF immediately and writes silently discard their data,
+ * matching the usual meaning of /dev/null. Implemented directly by dmdevfs
+ * (see driver_node_t::is_builtin) rather than by a loaded dmdrvi driver
+ * module, since a device this trivial does not warrant one.
+ */
+#define DMDEVFS_NULL_DEVICE_NAME "null"
+
+/**
  * @brief Hot-plug worker thread configuration
  *
  * MAL notifications (dmdrvi_device_available()/_unavailable()) only enqueue an
@@ -58,6 +69,9 @@ typedef struct
     bool is_dynamic;                    // True for devices announced via dmdrvi_device_available() (hot-plug);
                                          // such nodes share driver_context/driver with their owning node and must
                                          // never be passed to dmdrvi_free()/cleanup_driver_module() themselves.
+    bool is_builtin;                    // True for devices implemented directly by dmdevfs (e.g. the "null"
+                                         // device) rather than backed by a loaded dmdrvi driver module; driver
+                                         // and driver_context are unused (NULL) for these nodes.
     path_t path;                        // Path associated with the driver
 } driver_node_t;
 
@@ -204,6 +218,7 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
 static bool configure_required_dependencies(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry);
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx, const char* section_name);
 static int unconfigure_drivers(dmfsi_context_t ctx);
+static driver_node_t* create_builtin_null_device(void);
 static bool is_file(const char* path);
 static bool is_driver( const char* name);
 static void read_base_name(const char* path, char* base_name, size_t name_size);
@@ -365,6 +380,14 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     ctx->ready = false;
     ctx->mount_path[0] = '\0';
 
+    // Always present, regardless of configuration - see DMDEVFS_NULL_DEVICE_NAME.
+    driver_node_t* null_device = create_builtin_null_device();
+    if (null_device != NULL && !dmlist_push_back(ctx->drivers, null_device))
+    {
+        DMOD_LOG_ERROR("Failed to register built-in null device\n");
+        Dmod_Free(null_device);
+    }
+
     // Registered before configuring any driver (rather than after, as
     // before) so that dmdrvi_device_available()/_unavailable() can find this
     // mount even while a driver's own dmdrvi_create() is still running as
@@ -457,14 +480,6 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         return DMFSI_ERR_NOT_FOUND;
     }
     
-    // Get the dmdrvi_open function
-    dmod_dmdrvi_open_t dmdrvi_open = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_open_sig);
-    if(dmdrvi_open == NULL)
-    {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_open\n");
-        return DMFSI_ERR_NOT_FOUND;
-    }
-    
     // Create file handle
     file_handle_t* handle = Dmod_Malloc(sizeof(file_handle_t));
     if(handle == NULL)
@@ -472,17 +487,35 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         DMOD_LOG_ERROR("Failed to allocate memory for file handle\n");
         return DMFSI_ERR_GENERAL;
     }
-    
-    // Open the device through the driver, identifying which device within the
-    // context this is (the context's own device, or a hot-plugged sub-device)
-    handle->driver_handle = dmdrvi_open(driver_node->driver_context, mode, &driver_node->dev_num);
-    if(handle->driver_handle == NULL)
+
+    if(driver_node->is_builtin)
     {
-        DMOD_LOG_ERROR("Driver failed to open device: %s\n", path);
-        Dmod_Free(handle);
-        return DMFSI_ERR_GENERAL;
+        // No driver module to open a handle through - the handle itself
+        // (already a unique, non-NULL pointer) doubles as the sentinel value.
+        handle->driver_handle = handle;
     }
-    
+    else
+    {
+        // Get the dmdrvi_open function
+        dmod_dmdrvi_open_t dmdrvi_open = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_open_sig);
+        if(dmdrvi_open == NULL)
+        {
+            DMOD_LOG_ERROR("Driver does not implement dmdrvi_open\n");
+            Dmod_Free(handle);
+            return DMFSI_ERR_NOT_FOUND;
+        }
+
+        // Open the device through the driver, identifying which device within the
+        // context this is (the context's own device, or a hot-plugged sub-device)
+        handle->driver_handle = dmdrvi_open(driver_node->driver_context, mode, &driver_node->dev_num);
+        if(handle->driver_handle == NULL)
+        {
+            DMOD_LOG_ERROR("Driver failed to open device: %s\n", path);
+            Dmod_Free(handle);
+            return DMFSI_ERR_GENERAL;
+        }
+    }
+
     handle->driver = driver_node;
     handle->path = Dmod_StrDup(path);
     handle->mode = mode;
@@ -511,14 +544,17 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fclose, (dmfsi_context_t ctx
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
-    
-    // Get the dmdrvi_close function
-    dmod_dmdrvi_close_t dmdrvi_close = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_close_sig);
-    if(dmdrvi_close != NULL)
+
+    if(!handle->driver->is_builtin)
     {
-        dmdrvi_close(handle->driver->driver_context, handle->driver_handle);
+        // Get the dmdrvi_close function
+        dmod_dmdrvi_close_t dmdrvi_close = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_close_sig);
+        if(dmdrvi_close != NULL)
+        {
+            dmdrvi_close(handle->driver->driver_context, handle->driver_handle);
+        }
     }
-    
+
     // Free the path string that was duplicated in fopen
     if(handle->path)
     {
@@ -548,18 +584,27 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
-    
-    // Get the dmdrvi_read function
-    dmod_dmdrvi_read_t dmdrvi_read = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_read_sig);
-    if(dmdrvi_read == NULL)
+
+    size_t bytes_read;
+    if(handle->driver->is_builtin)
     {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_read\n");
-        if(read) *read = 0;
-        return DMFSI_ERR_NOT_FOUND;
+        // /dev/null: always at EOF
+        bytes_read = 0;
     }
-    
-    // dmdrvi_read returns size_t (bytes read), not error code
-    size_t bytes_read = dmdrvi_read(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
+    else
+    {
+        // Get the dmdrvi_read function
+        dmod_dmdrvi_read_t dmdrvi_read = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_read_sig);
+        if(dmdrvi_read == NULL)
+        {
+            DMOD_LOG_ERROR("Driver does not implement dmdrvi_read\n");
+            if(read) *read = 0;
+            return DMFSI_ERR_NOT_FOUND;
+        }
+
+        // dmdrvi_read returns size_t (bytes read), not error code
+        bytes_read = dmdrvi_read(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
+    }
     if(read) *read = bytes_read;
     handle->offset += (uint32_t)bytes_read;
     
@@ -585,18 +630,27 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
-    
-    // Get the dmdrvi_write function
-    dmod_dmdrvi_write_t dmdrvi_write = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_write_sig);
-    if(dmdrvi_write == NULL)
+
+    size_t bytes_written;
+    if(handle->driver->is_builtin)
     {
-        DMOD_LOG_ERROR("Driver does not implement dmdrvi_write\n");
-        if(written) *written = 0;
-        return DMFSI_ERR_NOT_FOUND;
+        // /dev/null: silently discard the data, report it all as written
+        bytes_written = size;
     }
-    
-    // dmdrvi_write returns size_t (bytes written), not error code
-    size_t bytes_written = dmdrvi_write(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
+    else
+    {
+        // Get the dmdrvi_write function
+        dmod_dmdrvi_write_t dmdrvi_write = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_write_sig);
+        if(dmdrvi_write == NULL)
+        {
+            DMOD_LOG_ERROR("Driver does not implement dmdrvi_write\n");
+            if(written) *written = 0;
+            return DMFSI_ERR_NOT_FOUND;
+        }
+
+        // dmdrvi_write returns size_t (bytes written), not error code
+        bytes_written = dmdrvi_write(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
+    }
     if(written) *written = bytes_written;
     handle->offset += (uint32_t)bytes_written;
     
@@ -674,6 +728,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx,
     }
 
     file_handle_t* handle = (file_handle_t*)fp;
+
+    if(handle->driver->is_builtin)
+    {
+        // No driver module behind a built-in device to carry out an ioctl
+        return DMFSI_ERR_NOT_FOUND;
+    }
 
     // Get the dmdrvi_ioctl function
     dmod_dmdrvi_ioctl_t dmdrvi_ioctl = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_ioctl_sig);
@@ -849,7 +909,13 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fflush, (dmfsi_context_t ctx
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
-    
+
+    if(handle->driver->is_builtin)
+    {
+        // Nothing to flush for a built-in device
+        return DMFSI_OK;
+    }
+
     // Get the dmdrvi_flush function
     dmod_dmdrvi_flush_t dmdrvi_flush = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_flush_sig);
     if(dmdrvi_flush == NULL)
@@ -885,7 +951,13 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _sync, (dmfsi_context_t ctx, 
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
-    
+
+    if(handle->driver->is_builtin)
+    {
+        // Nothing to sync for a built-in device
+        return DMFSI_OK;
+    }
+
     // Get the dmdrvi_flush function (sync and flush are equivalent for devices)
     dmod_dmdrvi_flush_t dmdrvi_flush = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_flush_sig);
     if(dmdrvi_flush == NULL)
@@ -1681,7 +1753,8 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
             // Dynamic (hot-plugged) nodes share driver_context/driver with the node that
             // owns them (created via dmdrvi_create) - only the owner may free the context
             // or release the module, otherwise it would be freed/unloaded more than once.
-            if (!driver_node->is_dynamic)
+            // Built-in nodes never had a module to begin with.
+            if (!driver_node->is_dynamic && !driver_node->is_builtin)
             {
                 dmod_dmdrvi_free_t dmdrvi_free = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_free_sig);
                 if (dmdrvi_free != NULL)
@@ -1700,6 +1773,29 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
     DMOD_LOG_INFO("Unconfigured all drivers\n");
 
     return DMFSI_OK;
+}
+
+/**
+ * @brief Create the built-in "null" device node, exposed at the root of
+ *        every mount (see DMDEVFS_NULL_DEVICE_NAME)
+ *
+ * Unlike configure_driver(), this does not load a dmdrvi module: is_builtin
+ * is set instead, and every place that would otherwise call into the
+ * driver module (fopen/fread/fwrite/ioctl/flush/stat/...) special-cases it.
+ */
+static driver_node_t* create_builtin_null_device(void)
+{
+    driver_node_t* node = Dmod_Malloc(sizeof(driver_node_t));
+    if (node == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for built-in null device\n");
+        return NULL;
+    }
+
+    memset(node, 0, sizeof(*node));
+    node->is_builtin = true;
+    Dmod_SnPrintf(node->path, sizeof(node->path), "/%s", DMDEVFS_NULL_DEVICE_NAME);
+    return node;
 }
 
 /**
@@ -1963,6 +2059,14 @@ static int read_driver_parent_directory( const driver_node_t* node, char* path_b
     }
 
     memset(path_buffer, 0, buffer_size);
+
+    if(node->is_builtin)
+    {
+        // Built-in devices (e.g. "null") always live at the mount's root
+        strncpy(path_buffer, ROOT_DIRECTORY_NAME, buffer_size);
+        return DMFSI_OK;
+    }
+
     const char* driver_name = Dmod_GetName( node->driver );
     if(driver_name == NULL)
     {
@@ -2230,6 +2334,13 @@ static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t*
         return DMFSI_ERR_INVALID;
     }
 
+    if (context->is_builtin)
+    {
+        // /dev/null: empty, regular, readable/writable file
+        memset(stat, 0, sizeof(*stat));
+        return DMFSI_OK;
+    }
+
     dmod_dmdrvi_stat_t dmdrvi_stat = Dmod_GetDifFunction(context->driver, dmod_dmdrvi_stat_sig);
     if (dmdrvi_stat == NULL)
     {
@@ -2455,6 +2566,12 @@ static int build_absolute_path( const char* mount_path, const char* node_path, c
  */
 static void notify_driver_path_ready( const char* mount_path, driver_node_t* node )
 {
+    if (node->is_builtin)
+    {
+        // No driver module behind a built-in device to notify
+        return;
+    }
+
     dmod_dmdrvi_path_ready_t path_ready = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_path_ready_sig);
     if (path_ready == NULL)
     {

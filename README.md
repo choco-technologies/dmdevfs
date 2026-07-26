@@ -111,6 +111,10 @@ dmvfs_deinit();
 
 **Note:** The configuration parameter cannot be NULL or empty. It must contain a valid path to a directory with driver configuration files. See the [Configuration Files](#configuration-files) section below for detailed information.
 
+### Built-in Devices
+
+Every DMDEVFS mount always exposes a `null` device at its root, regardless of configuration - e.g. `/mnt/null` (or `/dev/null` when mounted at `/dev`). Reads from it report EOF immediately (0 bytes) and writes to it are silently discarded while reporting every byte as written, matching the usual meaning of `/dev/null`. It is implemented directly by DMDEVFS rather than by a loaded driver module, so no `.ini` configuration or dmdrvi driver is needed to use it.
+
 ## Configuration Files
 
 DMDEVFS uses configuration files to define and initialize device drivers. This is a critical mechanism that allows the filesystem to dynamically discover and configure hardware drivers at mount time.
