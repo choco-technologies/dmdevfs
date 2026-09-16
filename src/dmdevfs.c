@@ -1419,6 +1419,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->was_loaded = was_loaded;
     driver_node->was_enabled = was_enabled;
     driver_node->is_dynamic = false;
+    driver_node->is_builtin = false;
     driver_node->driver = driver;
     driver_node->driver_context = dmdrvi_create(config_ctx, &driver_node->dev_num);
     if (driver_node->driver_context == NULL)
@@ -2730,6 +2731,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     new_node->was_loaded = false;
     new_node->was_enabled = false;
     new_node->is_dynamic = true;
+    new_node->is_builtin = false;
 
     if (read_driver_node_path(new_node, new_node->path, sizeof(new_node->path)) != 0)
     {
