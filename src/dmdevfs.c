@@ -49,9 +49,23 @@
  * a fixed-length queue, so a burst of hot-plug notifications can no longer
  * overflow a hard capacity and get silently dropped - it only fails if the
  * per-event allocation itself fails.
+ *
+ * The stack has to cover more than dmdevfs's own bookkeeping: this thread is
+ * what invokes each driver's dmdrvi_path_ready(), and that callback is by
+ * design a place where a driver reports the node onwards to whoever is
+ * listening. dmtty does exactly that - it hands the node to libsystemd, which
+ * (once device rules are loaded) matches it against a rule and starts the
+ * matching unit right there on this thread, parsing the unit file through
+ * dmini and loading the service's module on the way. Measured peak for that
+ * chain - dmdrvi_path_ready -> libsystemd_notify_device_added -> rule match ->
+ * console@<tty> -> Dmod_RunModuleDetached - is 2128 bytes, so the previous
+ * 512 was roughly a quarter of what the path actually needs and overflowed as
+ * soon as a device was reported after the rules had been loaded (i.e. on any
+ * genuine runtime hot-plug, not just at boot). 4096 leaves a ~2x margin over
+ * the measurement.
  */
 #define DMDEVFS_HOTPLUG_THREAD_PRIORITY     1
-#define DMDEVFS_HOTPLUG_THREAD_STACK_SIZE   (512 + DMOSI_THREAD_STACK_OVERHEAD)
+#define DMDEVFS_HOTPLUG_THREAD_STACK_SIZE   (4096 + DMOSI_THREAD_STACK_OVERHEAD)
 #define DMDEVFS_HOTPLUG_THREAD_NAME         "dmdevfs_hotplug"
 
 /**
