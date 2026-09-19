@@ -283,9 +283,9 @@ void dmod_preinit(void)
  */
 int dmod_init(const Dmod_Config_t *Config)
 {
-    g_dmdevfs_mounts    = dmlist_create(DMOD_MODULE_NAME);
+    g_dmdevfs_mounts    = dmlist_create();
     g_devfs_mutex       = dmosi_mutex_create(false);
-    g_hotplug_events    = dmlist_create(DMOD_MODULE_NAME);
+    g_hotplug_events    = dmlist_create();
     g_hotplug_mutex     = dmosi_mutex_create(false);
     g_hotplug_semaphore = dmosi_semaphore_create(0, UINT32_MAX);
     if (g_dmdevfs_mounts == NULL || g_devfs_mutex == NULL || g_hotplug_events == NULL ||
@@ -390,7 +390,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     
     ctx->magic = DMDEVFS_CONTEXT_MAGIC;
     ctx->config_path = Dmod_StrDup(config);
-    ctx->drivers = dmlist_create(DMOD_MODULE_NAME);
+    ctx->drivers = dmlist_create();
     ctx->ready = false;
     ctx->mount_path[0] = '\0';
 
@@ -1250,8 +1250,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _rename, (dmfsi_context_t ctx
  */
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path)
 {
-    dmlist_context_t* pending = dmlist_create(DMOD_MODULE_NAME);
-    dmlist_context_t* config_files = dmlist_create(DMOD_MODULE_NAME);
+    dmlist_context_t* pending = dmlist_create();
+    dmlist_context_t* config_files = dmlist_create();
     if (pending == NULL || config_files == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate driver configuration queues\n");
