@@ -87,6 +87,13 @@ typedef struct
                                          // device) rather than backed by a loaded dmdrvi driver module; driver
                                          // and driver_context are unused (NULL) for these nodes.
     path_t path;                        // Path associated with the driver
+    int  open_count;                    // Number of file_handle_t's currently open against this node (see
+                                         // _fopen()/_fclose()) - guards the free below against a still-open handle.
+    bool removed;                       // True once process_device_unavailable() has taken this node out of
+                                         // mount->drivers - the node itself is only actually freed once
+                                         // open_count also reaches zero (see _fclose()), so a handle opened
+                                         // before removal can keep reading/writing/closing it safely instead of
+                                         // dereferencing memory dmdevfs already freed out from under it.
 } driver_node_t;
 
 typedef struct
@@ -251,6 +258,8 @@ static bool is_directory( dmfsi_context_t ctx, const char* path );
 static driver_node_t* get_next_driver_node( dmfsi_context_t ctx, driver_node_t* current, const char* dir_path );
 
 static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path );
+static driver_node_t* find_and_ref_driver_node( dmfsi_context_t ctx, const char* path );
+static void release_driver_node_ref( driver_node_t* node );
 static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t* stat );
 static bool dev_num_equal( const dmdrvi_dev_num_t* a, const dmdrvi_dev_num_t* b );
 static int compare_driver_context( const void* data, const void* user_data );
@@ -486,19 +495,22 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         return DMFSI_ERR_INVALID;
     }
     
-    // Find the driver node for this file
-    driver_node_t* driver_node = find_driver_node(ctx, path);
+    // Find the driver node for this file, taking a reference on it so it
+    // cannot be freed out from under this handle by a concurrent
+    // process_device_unavailable() - see find_and_ref_driver_node().
+    driver_node_t* driver_node = find_and_ref_driver_node(ctx, path);
     if(driver_node == NULL)
     {
         DMOD_LOG_ERROR("File not found: %s\n", path);
         return DMFSI_ERR_NOT_FOUND;
     }
-    
+
     // Create file handle
     file_handle_t* handle = Dmod_Malloc(sizeof(file_handle_t));
     if(handle == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for file handle\n");
+        release_driver_node_ref(driver_node);
         return DMFSI_ERR_GENERAL;
     }
 
@@ -516,6 +528,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         {
             DMOD_LOG_ERROR("Driver does not implement dmdrvi_open\n");
             Dmod_Free(handle);
+            release_driver_node_ref(driver_node);
             return DMFSI_ERR_NOT_FOUND;
         }
 
@@ -526,6 +539,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         {
             DMOD_LOG_ERROR("Driver failed to open device: %s\n", path);
             Dmod_Free(handle);
+            release_driver_node_ref(driver_node);
             return DMFSI_ERR_GENERAL;
         }
     }
@@ -569,12 +583,17 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fclose, (dmfsi_context_t ctx
         }
     }
 
+    // Release the reference find_and_ref_driver_node() took in fopen() - if
+    // process_device_unavailable() already removed this node and this was
+    // the last handle still open on it, this is what actually frees it.
+    release_driver_node_ref(handle->driver);
+
     // Free the path string that was duplicated in fopen
     if(handle->path)
     {
         Dmod_Free((void*)handle->path);
     }
-    
+
     Dmod_Free(handle);
     return DMFSI_OK;
 }
@@ -757,13 +776,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx,
         return DMFSI_ERR_NOT_FOUND;
     }
 
-    int result = dmdrvi_ioctl(handle->driver->driver_context, handle->driver_handle, request, arg);
-    if(result != 0)
-    {
-        return DMFSI_ERR_GENERAL;
-    }
-
-    return DMFSI_OK;
+    /* ioctl belongs to the driver: preserve its negative errno for callers. */
+    return dmdrvi_ioctl(handle->driver->driver_context, handle->driver_handle, request, arg);
 }
 
 /**
@@ -1313,6 +1327,7 @@ static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* c
     const char* entry;
     while ((entry = Dmod_ReadDir(dir)) != NULL)
     {
+        if (!strcmp(entry, ".") || !strcmp(entry, "..")) continue;
         // Construct full path for the entry
         char full_path[MAX_PATH_LENGTH];
         size_t config_path_len = strlen(config_path);
@@ -1434,6 +1449,8 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->was_enabled = was_enabled;
     driver_node->is_dynamic = false;
     driver_node->is_builtin = false;
+    driver_node->open_count = 0;
+    driver_node->removed = false;
     driver_node->driver = driver;
     driver_node->driver_context = dmdrvi_create(config_ctx, &driver_node->dev_num);
     if (driver_node->driver_context == NULL)
@@ -1760,7 +1777,7 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
     }
 
     size_t list_size = dmlist_size(ctx->drivers);
-    for (size_t i = 0; i < list_size; i++)
+    for (size_t i = list_size; i-- > 0;)
     {
         driver_node_t* driver_node = (driver_node_t*)dmlist_get(ctx->drivers, i);
         if (driver_node != NULL)
@@ -2340,6 +2357,58 @@ static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path )
 }
 
 /**
+ * @brief Look up a driver node and take a reference on it, atomically
+ *
+ * Used by _fopen() instead of the plain find_driver_node() above: a file
+ * handle keeps its driver_node_t* for the handle's whole lifetime (see
+ * file_handle_t::driver), so between finding the node and actually starting
+ * to hold that reference there must be no window where
+ * process_device_unavailable() (running on the hot-plug thread, under this
+ * same g_devfs_mutex) can free it out from under the about-to-be-created
+ * handle. See release_driver_node_ref() for the other half.
+ *
+ * @return The node with its open_count already incremented, or NULL if no
+ *         node matches path.
+ */
+static driver_node_t* find_and_ref_driver_node( dmfsi_context_t ctx, const char* path )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    driver_node_t* node = (driver_node_t*)dmlist_find(ctx->drivers, path, compare_driver_node_path);
+    if (node != NULL)
+    {
+        node->open_count++;
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+    return node;
+}
+
+/**
+ * @brief Release a reference taken by find_and_ref_driver_node(), freeing
+ *        the node if process_device_unavailable() already removed it and
+ *        this was the last handle still holding it open
+ *
+ * @param node Node to release, or NULL (a no-op, for callers that may not
+ *             have obtained one)
+ */
+static void release_driver_node_ref( driver_node_t* node )
+{
+    if (node == NULL)
+    {
+        return;
+    }
+
+    dmosi_mutex_lock(g_devfs_mutex);
+    node->open_count--;
+    bool free_now = node->removed && node->open_count == 0;
+    dmosi_mutex_unlock(g_devfs_mutex);
+
+    if (free_now)
+    {
+        Dmod_Free(node);
+    }
+}
+
+/**
  * @brief Get file statistics from a driver
  */
 static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t* stat )
@@ -2746,6 +2815,8 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     new_node->was_enabled = false;
     new_node->is_dynamic = true;
     new_node->is_builtin = false;
+    new_node->open_count = 0;
+    new_node->removed = false;
 
     if (read_driver_node_path(new_node, new_node->path, sizeof(new_node->path)) != 0)
     {
@@ -2817,8 +2888,24 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
     removed_path[sizeof(removed_path) - 1] = '\0';
     dmlist_remove(mount->drivers, node, compare_driver);
 
+    /* Unpublished above (no new fopen() can find it via dmlist_find()), but
+     * a handle opened before this point may still be open on it - freeing
+     * unconditionally here raced that handle's own use of node->driver
+     * (see find_and_ref_driver_node()/release_driver_node_ref()): a read,
+     * write or close arriving after this free dereferenced memory dmdevfs
+     * itself had already handed back to the allocator. Deferring the free
+     * to the last matching _fclose() closes that window. */
+    bool free_now = (node->open_count == 0);
+    if (!free_now)
+    {
+        node->removed = true;
+    }
+
     dmosi_mutex_unlock(g_devfs_mutex);
 
-    Dmod_Free(node);
+    if (free_now)
+    {
+        Dmod_Free(node);
+    }
     DMOD_LOG_INFO("Hot-plugged device no longer available: %s\n", removed_path);
 }
