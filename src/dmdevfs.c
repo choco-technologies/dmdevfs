@@ -86,6 +86,8 @@ typedef struct
     bool is_builtin;                    // True for devices implemented directly by dmdevfs (e.g. the "null"
                                          // device) rather than backed by a loaded dmdrvi driver module; driver
                                          // and driver_context are unused (NULL) for these nodes.
+    char* friends_group;                // Optional friends_group copied from the owning configuration.
+    char* friend_role;                  // Optional friend_role copied from the owning configuration.
     path_t path;                        // Path associated with the driver
     int  open_count;                    // Number of file_handle_t's currently open against this node (see
                                          // _fopen()/_fclose()) - guards the free below against a still-open handle.
@@ -270,6 +272,10 @@ static int compare_mount_owns_dynamic_device( const void* data, const void* user
 static int build_absolute_path( const char* mount_path, const char* node_path, char* out, size_t out_size );
 static void notify_driver_path_ready( const char* mount_path, driver_node_t* node );
 static bool notify_all_drivers_path_ready( void* data, void* user_data );
+static void notify_friends_about_node( dmfsi_context_t mount, driver_node_t* node, dmdrvi_dev_state_t state );
+static bool notify_friend_recipient( void* data, void* user_data );
+static bool notify_all_friends_ready( void* data, void* user_data );
+static void free_driver_node( driver_node_t* node );
 static void hotplug_worker_thread( void* arg );
 static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num, bool available );
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
@@ -1449,6 +1455,8 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->was_enabled = was_enabled;
     driver_node->is_dynamic = false;
     driver_node->is_builtin = false;
+    driver_node->friends_group = NULL;
+    driver_node->friend_role = NULL;
     driver_node->open_count = 0;
     driver_node->removed = false;
     driver_node->driver = driver;
@@ -1460,6 +1468,58 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
         Dmod_Free(driver_node);
         DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
+    }
+
+    /*
+     * dmini strings belong to config_ctx, which is released as soon as the
+     * last pending entry from the file has been configured.  Friends metadata
+     * has to live for the whole device lifetime, so retain our own copies.
+     * Section-based configurations are active here and therefore use NULL;
+     * traditional single-driver files normally keep these keys in [main].
+     */
+    const char* friends_group = section_name != NULL
+        ? dmini_get_string(config_ctx, NULL, "friends_group", NULL)
+        : dmini_get_string(config_ctx, INI_MAIN_SECTION, "friends_group",
+              dmini_get_string(config_ctx, NULL, "friends_group", NULL));
+    const char* friend_role = section_name != NULL
+        ? dmini_get_string(config_ctx, NULL, "friend_role", NULL)
+        : dmini_get_string(config_ctx, INI_MAIN_SECTION, "friend_role",
+              dmini_get_string(config_ctx, NULL, "friend_role", NULL));
+
+    if (friends_group != NULL && friends_group[0] != '\0')
+    {
+        driver_node->friends_group = Dmod_StrDup(friends_group);
+        if (driver_node->friends_group == NULL)
+        {
+            DMOD_LOG_ERROR("Failed to retain friends group for driver: %s\n", driver_name);
+            dmod_dmdrvi_free_t dmdrvi_free = Dmod_GetDifFunction(driver, dmod_dmdrvi_free_sig);
+            if (dmdrvi_free != NULL)
+            {
+                dmdrvi_free(driver_node->driver_context);
+            }
+            cleanup_driver_module(driver_name, was_loaded, was_enabled);
+            Dmod_Free(driver_node);
+            DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
+            return NULL;
+        }
+    }
+    if (friend_role != NULL && friend_role[0] != '\0')
+    {
+        driver_node->friend_role = Dmod_StrDup(friend_role);
+        if (driver_node->friend_role == NULL)
+        {
+            DMOD_LOG_ERROR("Failed to retain friend role for driver: %s\n", driver_name);
+            dmod_dmdrvi_free_t dmdrvi_free = Dmod_GetDifFunction(driver, dmod_dmdrvi_free_sig);
+            if (dmdrvi_free != NULL)
+            {
+                dmdrvi_free(driver_node->driver_context);
+            }
+            cleanup_driver_module(driver_name, was_loaded, was_enabled);
+            Dmod_Free(driver_node->friends_group);
+            Dmod_Free(driver_node);
+            DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
+            return NULL;
+        }
     }
 
     if ((driver_node->dev_num.flags & DMDRVI_NUM_ALT_NAME) != 0 && driver_node->dev_num.alt_name[0] == '\0')
@@ -1484,7 +1544,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
             dmdrvi_free(driver_node->driver_context);
         }
         cleanup_driver_module(driver_name, was_loaded, was_enabled);
-        Dmod_Free(driver_node);
+        free_driver_node(driver_node);
         DMOD_LOG_STEP(1, "Failed to configure driver: %s\n", driver_name);
         return NULL;
     }
@@ -1689,7 +1749,7 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     if (!dmlist_push_back(ctx->drivers, driver_node))
     {
         DMOD_LOG_ERROR("Failed to add driver to list: %s\n", entry->module_name);
-        Dmod_Free(driver_node);
+        free_driver_node(driver_node);
         release_config_file_ref(entry->file_entry);
         return false;
     }
@@ -1710,6 +1770,7 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     if (ready)
     {
         notify_driver_path_ready(mount_path, driver_node);
+        notify_friends_about_node(ctx, driver_node, dmdrvi_dev_state_ready);
     }
 
     entry->configured = true;
@@ -1796,7 +1857,7 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
                 }
                 cleanup_driver_module(Dmod_GetName(driver_node->driver), driver_node->was_loaded, driver_node->was_enabled);
             }
-            Dmod_Free(driver_node);
+            free_driver_node(driver_node);
         }
     }
 
@@ -2404,7 +2465,7 @@ static void release_driver_node_ref( driver_node_t* node )
 
     if (free_now)
     {
-        Dmod_Free(node);
+        free_driver_node(node);
     }
 }
 
@@ -2681,6 +2742,111 @@ static bool notify_all_drivers_path_ready( void* data, void* user_data )
     return true;
 }
 
+typedef struct
+{
+    driver_node_t* source;
+    const dmdrvi_friend_info_t* info;
+} friend_notification_t;
+
+/**
+ * @brief dmlist_foreach() callback delivering one friends notification
+ */
+static bool notify_friend_recipient( void* data, void* user_data )
+{
+    driver_node_t* recipient = (driver_node_t*)data;
+    const friend_notification_t* notification = (const friend_notification_t*)user_data;
+    driver_node_t* source = notification->source;
+
+    if (recipient == NULL || recipient->is_builtin || recipient->is_dynamic ||
+        recipient->driver_context == source->driver_context ||
+        recipient->friends_group == NULL ||
+        strcmp(recipient->friends_group, source->friends_group) != 0)
+    {
+        return true;
+    }
+
+    dmod_dmdrvi_friend_changed_t friend_changed =
+        Dmod_GetDifFunction(recipient->driver, dmod_dmdrvi_friend_changed_sig);
+    if (friend_changed != NULL)
+    {
+        friend_changed(recipient->driver_context, notification->info);
+    }
+    return true;
+}
+
+/**
+ * @brief Notify every other configured member of a friends group about a node
+ *
+ * Dynamic nodes inherit their owner's group, but are not themselves callback
+ * recipients: they share the same driver context and would otherwise deliver
+ * the same event more than once.  The source context is skipped as well; a
+ * driver already owns (and therefore knows) its own devices.
+ *
+ * Must be called without g_devfs_mutex held because friend_changed is driver
+ * code and may call back into the filesystem.
+ */
+static void notify_friends_about_node( dmfsi_context_t mount, driver_node_t* node, dmdrvi_dev_state_t state )
+{
+    if (mount == NULL || node == NULL || node->is_builtin || node->friends_group == NULL)
+    {
+        return;
+    }
+
+    path_t absolute_path;
+    const char* node_path = NULL;
+    if (mount->ready && build_absolute_path(mount->mount_path, node->path,
+            absolute_path, sizeof(absolute_path)) == 0)
+    {
+        node_path = absolute_path;
+    }
+
+    dmdrvi_friend_info_t info = {
+        .alt_name = ((node->dev_num.flags & DMDRVI_NUM_ALT_NAME) != 0 &&
+                     node->dev_num.alt_name[0] != '\0') ? node->dev_num.alt_name : NULL,
+        .group_name = node->friends_group,
+        .friend_role = node->friend_role,
+        .node_path = node_path,
+        .state = state,
+        .dev_num = &node->dev_num,
+    };
+
+    friend_notification_t notification = {
+        .source = node,
+        .info = &info,
+    };
+    dmlist_foreach(mount->drivers, notify_friend_recipient, &notification);
+}
+
+/**
+ * @brief dmlist_foreach() callback broadcasting one ready group member
+ */
+static bool notify_all_friends_ready( void* data, void* user_data )
+{
+    notify_friends_about_node((dmfsi_context_t)user_data, (driver_node_t*)data,
+                              dmdrvi_dev_state_ready);
+    return true;
+}
+
+/**
+ * @brief Free a node and the friends metadata owned by it
+ */
+static void free_driver_node( driver_node_t* node )
+{
+    if (node == NULL)
+    {
+        return;
+    }
+    if (node->friend_role != NULL)
+    {
+        Dmod_Free(node->friend_role);
+    }
+    if (node->friends_group != NULL)
+    {
+        Dmod_Free(node->friends_group);
+    }
+    Dmod_Free(node);
+}
+
 /**
  * @brief DIF implementation of dmfsi_mounted()
  *
@@ -2711,6 +2877,10 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, void, _mounted, (dmfsi_context_t c
     // mutated here, only iterated - concurrent hot-plug insertions are
     // handled by process_device_available() directly.
     dmlist_foreach(ctx->drivers, notify_all_drivers_path_ready, ctx->mount_path);
+
+    // All absolute paths are known now. Broadcast each group member only
+    // after the path_ready pass, so recipients always receive complete info.
+    dmlist_foreach(ctx->drivers, notify_all_friends_ready, ctx);
 }
 
 /**
@@ -2798,13 +2968,27 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     driver_node_t* owner = (driver_node_t*)dmlist_find(mount->drivers, (void*)context, compare_driver_context);
     dmdrvi_context_t owner_context = owner->driver_context;
     Dmod_Context_t* owner_driver = owner->driver;
+    bool owner_has_group = owner->friends_group != NULL;
+    bool owner_has_role = owner->friend_role != NULL;
+    char* owner_group = owner_has_group ? Dmod_StrDup(owner->friends_group) : NULL;
+    char* owner_role = owner_has_role ? Dmod_StrDup(owner->friend_role) : NULL;
 
     dmosi_mutex_unlock(g_devfs_mutex);
+
+    if ((owner_has_group && owner_group == NULL) || (owner_has_role && owner_role == NULL))
+    {
+        DMOD_LOG_ERROR("dmdrvi_device_available: failed to retain friends metadata\n");
+        if (owner_role != NULL) Dmod_Free(owner_role);
+        if (owner_group != NULL) Dmod_Free(owner_group);
+        return;
+    }
 
     driver_node_t* new_node = Dmod_Malloc(sizeof(driver_node_t));
     if (new_node == NULL)
     {
         DMOD_LOG_ERROR("dmdrvi_device_available: failed to allocate device node\n");
+        if (owner_role != NULL) Dmod_Free(owner_role);
+        if (owner_group != NULL) Dmod_Free(owner_group);
         return;
     }
 
@@ -2815,13 +2999,15 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     new_node->was_enabled = false;
     new_node->is_dynamic = true;
     new_node->is_builtin = false;
+    new_node->friends_group = owner_group;
+    new_node->friend_role = owner_role;
     new_node->open_count = 0;
     new_node->removed = false;
 
     if (read_driver_node_path(new_node, new_node->path, sizeof(new_node->path)) != 0)
     {
         DMOD_LOG_ERROR("dmdrvi_device_available: failed to compute device path\n");
-        Dmod_Free(new_node);
+        free_driver_node(new_node);
         return;
     }
 
@@ -2842,13 +3028,13 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     if (!mount_still_valid)
     {
         DMOD_LOG_ERROR("dmdrvi_device_available: mount was unmounted while processing event\n");
-        Dmod_Free(new_node);
+        free_driver_node(new_node);
         return;
     }
     if (!inserted)
     {
         DMOD_LOG_ERROR("dmdrvi_device_available: failed to register device node\n");
-        Dmod_Free(new_node);
+        free_driver_node(new_node);
         return;
     }
 
@@ -2858,6 +3044,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     if (mount_ready)
     {
         notify_driver_path_ready(mount_path, new_node);
+        notify_friends_about_node(mount, new_node, dmdrvi_dev_state_ready);
     }
 
     DMOD_LOG_INFO("Hot-plugged device now available: %s\n", new_node->path);
@@ -2895,17 +3082,16 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
      * write or close arriving after this free dereferenced memory dmdevfs
      * itself had already handed back to the allocator. Deferring the free
      * to the last matching _fclose() closes that window. */
-    bool free_now = (node->open_count == 0);
-    if (!free_now)
-    {
-        node->removed = true;
-    }
+    node->removed = true;
+    node->open_count++; // Keep metadata alive across the unlocked callbacks below.
 
     dmosi_mutex_unlock(g_devfs_mutex);
 
-    if (free_now)
-    {
-        Dmod_Free(node);
-    }
+    // The node has already been unpublished, so callbacks cannot reopen it.
+    // Its metadata remains valid until all callbacks (and any open handles)
+    // have released it.
+    notify_friends_about_node(mount, node, dmdrvi_dev_state_dead);
+
+    release_driver_node_ref(node);
     DMOD_LOG_INFO("Hot-plugged device no longer available: %s\n", removed_path);
 }
