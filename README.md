@@ -146,6 +146,8 @@ parameter2 = value2
 #### Optional Fields
 
 - **`driver_order`**: An integer that controls when the driver is configured relative to other drivers. All drivers with `driver_order = 0` (the default when the field is omitted) are configured before any driver with `driver_order = 1`, which in turn is configured before `driver_order = 2`, and so on. Use this to force a driver to be configured after another one when there is no dmod dependency between them to infer the order from automatically.
+- **`friends_group`**: Groups configurations that form one logical peripheral. Once device paths are available, DMDEVFS reports every other member of the group through the optional driver's `dmdrvi_friend_changed()` callback.
+- **`friend_role`**: Optional application-defined role of this member inside its friends group, such as `chip_select`. It lets consumers distinguish several devices of the same type without relying on section names or generated paths.
 
 Any additional parameters in the configuration file are passed to the driver's initialization function. The interpretation of these parameters depends on the specific driver implementation.
 
@@ -157,6 +159,37 @@ Two mechanisms determine the order in which drivers are configured (i.e. the ord
 2. **`driver_order` (manual)**: Within what dependencies leave unconstrained, drivers are configured in ascending `driver_order` groups (default `0`). This is a manual escape hatch for ordering requirements that aren't expressed as a dmod dependency.
 
 Dependency resolution always takes precedence over `driver_order`: if a driver in a later `driver_order` group is required by one in an earlier group, it is still configured first.
+
+### Friends Groups
+
+Use the same `friends_group` in related driver sections when one driver needs
+to discover device nodes exposed by another. `friend_role` can give a member a
+stable logical purpose:
+
+```ini
+[spi_cs]
+driver_name=dmgpio
+friends_group=board_spi
+friend_role=chip_select
+pin=PI0
+mode=output
+
+[spi]
+driver_name=dmspi
+friends_group=board_spi
+instance=2
+```
+
+After the filesystem is mounted, DMDEVFS calls `dmdrvi_friend_changed()` for
+the other configured members of `board_spi`. The supplied
+`dmdrvi_friend_info_t` contains the group and role, device number, alternative
+name, absolute node path, and `dmdrvi_dev_state_ready`. Drivers must copy any
+string they want to retain after the callback returns.
+
+Devices announced later with `dmdrvi_device_available()` inherit their
+owner's group and role and generate a `ready` notification. Removing such a
+device with `dmdrvi_device_unavailable()` generates a `dead` notification.
+Both `friends_group` and the callback are optional.
 
 ### Configuration Directory Structure
 
