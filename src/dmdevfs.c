@@ -699,7 +699,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
 /**
  * @brief Seek to a position in a file
  */
-dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _lseek, (dmfsi_context_t ctx, void* fp, long offset, int whence) )
+dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, dmfsi_offset_t, _lseek, (dmfsi_context_t ctx, void* fp, dmfsi_offset_t offset, int whence) )
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
@@ -713,7 +713,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _lseek, (dmfsi_context_t ctx
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
-    long new_offset;
+    dmfsi_offset_t new_offset;
 
     if(whence == DMFSI_SEEK_SET)
     {
@@ -721,7 +721,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _lseek, (dmfsi_context_t ctx
     }
     else if(whence == DMFSI_SEEK_CUR)
     {
-        new_offset = (long)handle->offset + offset;
+        new_offset = (dmfsi_offset_t)handle->offset + offset;
     }
     else if(whence == DMFSI_SEEK_END)
     {
@@ -732,7 +732,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _lseek, (dmfsi_context_t ctx
             DMOD_LOG_ERROR("lseek SEEK_END: failed to get file size\n");
             return DMFSI_ERR_GENERAL;
         }
-        new_offset = (long)stat.size + offset;
+        new_offset = (dmfsi_offset_t)stat.size + offset;
     }
     else
     {
@@ -746,7 +746,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _lseek, (dmfsi_context_t ctx
         return DMFSI_ERR_INVALID;
     }
 
-    handle->offset = (uint32_t)new_offset;
+    handle->offset = (dmfsi_offset_t)new_offset;
     return new_offset;
 }
 
@@ -789,7 +789,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx,
 /**
  * @brief Get current position in a file
  */
-dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx, void* fp) )
+dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, dmfsi_offset_t, _tell, (dmfsi_context_t ctx, void* fp) )
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
@@ -803,7 +803,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _tell, (dmfsi_context_t ctx,
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
-    return (long)handle->offset;
+    return (dmfsi_offset_t)handle->offset;
 }
 
 /**
@@ -843,7 +843,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, v
  * @brief Get file size
  * @note Device drivers represent devices, not files with fixed sizes. Use stat for size info.
  */
-dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _size, (dmfsi_context_t ctx, void* fp) )
+dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, dmfsi_size_t, _size, (dmfsi_context_t ctx, void* fp) )
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
@@ -863,7 +863,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, long, _size, (dmfsi_context_t ctx,
     int result = driver_stat(handle->driver, handle->path, &stat);
     if(result == 0)
     {
-        return (long)stat.size;
+        return (dmfsi_size_t)stat.size;
     }
     
     // Size not available for this device
@@ -1177,7 +1177,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _direxists, (dmfsi_context_t 
 /**
  * @brief Get file/directory statistics
  */
-dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _stat, (dmfsi_context_t ctx, const char* path, dmfsi_stat_t* stat) )
+dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, int, _stat, (dmfsi_context_t ctx, const char* path, dmfsi_stat_t* stat) )
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
