@@ -170,7 +170,7 @@ typedef struct
     const char* path;           // File path
     int mode;                   // File open mode
     int attr;                   // File attributes
-    uint32_t offset;            // Current byte offset within the device
+    dmfsi_offset_t offset;      // Current byte offset within the device
 } file_handle_t;
 
 /**
@@ -624,7 +624,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
     
     file_handle_t* handle = (file_handle_t*)fp;
 
-    size_t bytes_read;
+    dmdrvi_ssize_t bytes_read;
     if(handle->driver->is_builtin)
     {
         // /dev/null: always at EOF
@@ -641,12 +641,17 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
             return DMFSI_ERR_NOT_FOUND;
         }
 
-        // dmdrvi_read returns size_t (bytes read), not error code
+        // dmdrvi_read (2.0) returns bytes read, zero at EOF, or a negative errno
         bytes_read = dmdrvi_read(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
+        if(bytes_read < 0)
+        {
+            if(read) *read = 0;
+            return DMFSI_ERR_GENERAL;
+        }
     }
-    if(read) *read = bytes_read;
-    handle->offset += (uint32_t)bytes_read;
-    
+    if(read) *read = (size_t)bytes_read;
+    handle->offset += bytes_read;
+
     return DMFSI_OK;
 }
 
@@ -670,11 +675,11 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
     
     file_handle_t* handle = (file_handle_t*)fp;
 
-    size_t bytes_written;
+    dmdrvi_ssize_t bytes_written;
     if(handle->driver->is_builtin)
     {
         // /dev/null: silently discard the data, report it all as written
-        bytes_written = size;
+        bytes_written = (dmdrvi_ssize_t)size;
     }
     else
     {
@@ -687,12 +692,17 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
             return DMFSI_ERR_NOT_FOUND;
         }
 
-        // dmdrvi_write returns size_t (bytes written), not error code
+        // dmdrvi_write (2.0) returns bytes written or a negative errno
         bytes_written = dmdrvi_write(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
+        if(bytes_written < 0)
+        {
+            if(written) *written = 0;
+            return DMFSI_ERR_GENERAL;
+        }
     }
-    if(written) *written = bytes_written;
-    handle->offset += (uint32_t)bytes_written;
-    
+    if(written) *written = (size_t)bytes_written;
+    handle->offset += bytes_written;
+
     return DMFSI_OK;
 }
 
@@ -721,7 +731,7 @@ dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, dmfsi_offset_t, _lseek, (dmfsi_con
     }
     else if(whence == DMFSI_SEEK_CUR)
     {
-        new_offset = (dmfsi_offset_t)handle->offset + offset;
+        new_offset = handle->offset + offset;
     }
     else if(whence == DMFSI_SEEK_END)
     {
@@ -746,7 +756,7 @@ dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, dmfsi_offset_t, _lseek, (dmfsi_con
         return DMFSI_ERR_INVALID;
     }
 
-    handle->offset = (dmfsi_offset_t)new_offset;
+    handle->offset = new_offset;
     return new_offset;
 }
 
@@ -803,7 +813,7 @@ dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, dmfsi_offset_t, _tell, (dmfsi_cont
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
-    return (dmfsi_offset_t)handle->offset;
+    return handle->offset;
 }
 
 /**
@@ -832,7 +842,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, v
     int result = driver_stat(handle->driver, handle->path, &stat);
     if(result == 0)
     {
-        return (handle->offset >= stat.size) ? 1 : 0;
+        return ((dmdrvi_size_t)handle->offset >= stat.size) ? 1 : 0;
     }
     
     // Size not available - cannot determine EOF
