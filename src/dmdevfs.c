@@ -16,6 +16,8 @@
 #include "dmini.h"
 #include "dmdrvi.h"
 #include "dmosi.h"
+#include "libsystemd.h"
+#include <errno.h>
 #include <string.h>
 
 /**
@@ -36,6 +38,43 @@
  * module, since a device this trivial does not warrant one.
  */
 #define DMDEVFS_NULL_DEVICE_NAME "null"
+
+/**
+ * @brief Device classes dmdevfs reports nodes under to libsystemd
+ *
+ * Once a node's absolute path is known, dmdevfs asks its driver what the node
+ * is and reports it to libsystemd, so device rules can start services for it
+ * (see report_node_added()):
+ *
+ *  - "monitor": the driver answers DMDRVI_IOCTL_MONITOR_GET_POLICY - a
+ *    monitor service (dmdevmon) has to drive it;
+ *  - "block": the driver answers DMDRVI_IOCTL_BLOCK_GET_INFO - a block
+ *    device, e.g. for automount.
+ *
+ * The device name is the node path relative to the mount with '/' replaced
+ * by '_' (unit names cannot contain '/'): "/dmsdio0/0" -> "dmsdio0_0". The
+ * user value is the node's absolute path. Removal is reported when the node
+ * goes away (dmdrvi_device_unavailable() or teardown), which makes libsystemd
+ * stop the matching units.
+ */
+#define DMDEVFS_CLASS_MONITOR   "monitor"
+#define DMDEVFS_CLASS_BLOCK     "block"
+
+/**
+ * @brief Bits of driver_node_t::report_mask / driver_node_t::reported
+ */
+#define DMDEVFS_REPORT_MONITOR  0x01u
+#define DMDEVFS_REPORT_BLOCK    0x02u
+#define DMDEVFS_REPORT_ALL      (DMDEVFS_REPORT_MONITOR | DMDEVFS_REPORT_BLOCK)
+
+/**
+ * @brief Configuration key limiting what a device's nodes are reported as
+ *
+ * "all" (default), "monitor", "block" or "none" - e.g. "none" for raw flash
+ * that must never be picked up by automount. Read from the same place as
+ * friends_group (see configure_driver()); hot-plugged nodes inherit it.
+ */
+#define DMDEVFS_REPORT_KEY      "report"
 
 /**
  * @brief Hot-plug worker thread configuration
@@ -63,6 +102,12 @@
  * soon as a device was reported after the rules had been loaded (i.e. on any
  * genuine runtime hot-plug, not just at boot). 4096 leaves a ~2x margin over
  * the measurement.
+ *
+ * dmdevfs now reports nodes to libsystemd itself on this thread as well
+ * (report_node_added()/report_node_removed()): the same notify -> rule ->
+ * start chain, preceded by a short open/ioctl/close probe of the node. A
+ * removal also waits (up to the unit's stop_timeout_ms) for services that
+ * stop gracefully, so hot-plug events queue up behind it meanwhile.
  */
 #define DMDEVFS_HOTPLUG_THREAD_PRIORITY     1
 #define DMDEVFS_HOTPLUG_THREAD_STACK_SIZE   (4096 + DMOSI_THREAD_STACK_OVERHEAD)
@@ -89,6 +134,9 @@ typedef struct
     char* friends_group;                // Optional friends_group copied from the owning configuration.
     char* friend_role;                  // Optional friend_role copied from the owning configuration.
     path_t path;                        // Path associated with the driver
+    uint8_t report_mask;                // DMDEVFS_REPORT_* classes this node may be reported under (report= key).
+    uint8_t reported;                   // DMDEVFS_REPORT_* classes this node is currently reported under to
+                                         // libsystemd; guarded by g_devfs_mutex (see report_node_added()).
     int  open_count;                    // Number of file_handle_t's currently open against this node (see
                                          // _fopen()/_fclose()) - guards the free below against a still-open handle.
     bool removed;                       // True once process_device_unavailable() has taken this node out of
@@ -271,6 +319,9 @@ static int compare_mount_owns_context( const void* data, const void* user_data )
 static int compare_mount_owns_dynamic_device( const void* data, const void* user_data );
 static int build_absolute_path( const char* mount_path, const char* node_path, char* out, size_t out_size );
 static void notify_driver_path_ready( const char* mount_path, driver_node_t* node );
+static uint8_t read_report_mask( dmini_context_t config_ctx, const char* section_name, const char* driver_name );
+static void report_node_added( const char* abs_path, driver_node_t* node );
+static void report_node_removed( driver_node_t* node );
 static bool notify_all_drivers_path_ready( void* data, void* user_data );
 static void notify_friends_about_node( dmfsi_context_t mount, driver_node_t* node, dmdrvi_dev_state_t state );
 static bool notify_friend_recipient( void* data, void* user_data );
@@ -1467,6 +1518,8 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->is_builtin = false;
     driver_node->friends_group = NULL;
     driver_node->friend_role = NULL;
+    driver_node->report_mask = read_report_mask(config_ctx, section_name, driver_name);
+    driver_node->reported = 0;
     driver_node->open_count = 0;
     driver_node->removed = false;
     driver_node->driver = driver;
@@ -1853,6 +1906,10 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
         driver_node_t* driver_node = (driver_node_t*)dmlist_get(ctx->drivers, i);
         if (driver_node != NULL)
         {
+            // Before the driver goes away: stops the services started for it,
+            // which may still talk to the device while they shut down.
+            report_node_removed(driver_node);
+
             // Dynamic (hot-plugged) nodes share driver_context/driver with the node that
             // owns them (created via dmdrvi_create) - only the owner may free the context
             // or release the module, otherwise it would be freed/unloaded more than once.
@@ -2708,7 +2765,8 @@ static int build_absolute_path( const char* mount_path, const char* node_path, c
 }
 
 /**
- * @brief Push a device's now-known absolute path to its driver, if implemented
+ * @brief Push a device's now-known absolute path to its driver, if implemented,
+ *        and report the node to libsystemd (see report_node_added())
  *
  * Called once dmdevfs itself is ready (mount->ready) and `node` is
  * registered - either while flushing already-registered devices from
@@ -2727,12 +2785,6 @@ static void notify_driver_path_ready( const char* mount_path, driver_node_t* nod
         return;
     }
 
-    dmod_dmdrvi_path_ready_t path_ready = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_path_ready_sig);
-    if (path_ready == NULL)
-    {
-        return;
-    }
-
     path_t abs_path;
     if (build_absolute_path(mount_path, node->path, abs_path, sizeof(abs_path)) != 0)
     {
@@ -2740,7 +2792,205 @@ static void notify_driver_path_ready( const char* mount_path, driver_node_t* nod
         return;
     }
 
-    path_ready(node->driver_context, &node->dev_num, abs_path);
+    dmod_dmdrvi_path_ready_t path_ready = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_path_ready_sig);
+    if (path_ready != NULL)
+    {
+        path_ready(node->driver_context, &node->dev_num, abs_path);
+    }
+
+    // After the driver has seen its own path: a service started for the node
+    // may open it right away.
+    report_node_added(abs_path, node);
+}
+
+/**
+ * @brief Read the report= key of a device configuration (see DMDEVFS_REPORT_KEY)
+ *
+ * Looked up exactly like friends_group: in the active section for
+ * section-based configurations, in [main] (falling back to the global
+ * section) for single-driver files.
+ *
+ * @return DMDEVFS_REPORT_* mask; DMDEVFS_REPORT_ALL when absent or unknown
+ *         (the latter logged).
+ */
+static uint8_t read_report_mask( dmini_context_t config_ctx, const char* section_name, const char* driver_name )
+{
+    const char* value = section_name != NULL
+        ? dmini_get_string(config_ctx, NULL, DMDEVFS_REPORT_KEY, NULL)
+        : dmini_get_string(config_ctx, INI_MAIN_SECTION, DMDEVFS_REPORT_KEY,
+              dmini_get_string(config_ctx, NULL, DMDEVFS_REPORT_KEY, NULL));
+
+    if (value == NULL || strcmp(value, "all") == 0)
+    {
+        return DMDEVFS_REPORT_ALL;
+    }
+    if (strcmp(value, "none") == 0)
+    {
+        return 0;
+    }
+    if (strcmp(value, DMDEVFS_CLASS_MONITOR) == 0)
+    {
+        return DMDEVFS_REPORT_MONITOR;
+    }
+    if (strcmp(value, DMDEVFS_CLASS_BLOCK) == 0)
+    {
+        return DMDEVFS_REPORT_BLOCK;
+    }
+
+    DMOD_LOG_WARN("Unknown %s=%s for driver %s, reporting all classes\n", DMDEVFS_REPORT_KEY, value, driver_name);
+    return DMDEVFS_REPORT_ALL;
+}
+
+/**
+ * @brief Build the libsystemd device name of a node from its mount-relative path
+ *
+ * "/dmsdio0/0" -> "dmsdio0_0": the leading '/' is dropped and every other '/'
+ * becomes '_', since the name ends up in unit names ("dmdevmon@dmsdio0_0").
+ */
+static void build_report_name( const char* node_path, char* out, size_t out_size )
+{
+    const char* src = (node_path[0] == '/') ? node_path + 1 : node_path;
+    size_t i = 0;
+    for ( ; src[i] != '\0' && i + 1 < out_size; i++)
+    {
+        out[i] = (src[i] == '/') ? '_' : src[i];
+    }
+    out[i] = '\0';
+}
+
+/**
+ * @brief Ask a node's driver which classes the node belongs to
+ *
+ * Opens the node read-only through its driver, issues
+ * DMDRVI_IOCTL_MONITOR_GET_POLICY and/or DMDRVI_IOCTL_BLOCK_GET_INFO (only
+ * those allowed by @p wanted) and closes it again. A driver that cannot be
+ * opened, or answers neither, yields 0 - nothing is reported for it.
+ *
+ * Must be called without g_devfs_mutex held (driver code).
+ */
+static uint8_t probe_node_classes( driver_node_t* node, uint8_t wanted )
+{
+    dmod_dmdrvi_open_t dmdrvi_open = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_open_sig);
+    dmod_dmdrvi_ioctl_t dmdrvi_ioctl = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_ioctl_sig);
+    dmod_dmdrvi_close_t dmdrvi_close = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_close_sig);
+    if (wanted == 0 || dmdrvi_open == NULL || dmdrvi_ioctl == NULL || dmdrvi_close == NULL)
+    {
+        return 0;
+    }
+
+    void* handle = dmdrvi_open(node->driver_context, DMDRVI_O_RDONLY, &node->dev_num);
+    if (handle == NULL)
+    {
+        return 0;
+    }
+
+    uint8_t classes = 0;
+    dmdrvi_monitor_policy_t policy;
+    if ((wanted & DMDEVFS_REPORT_MONITOR) != 0 &&
+        dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_MONITOR_GET_POLICY, &policy) == 0)
+    {
+        classes |= DMDEVFS_REPORT_MONITOR;
+    }
+    dmdrvi_block_info_t info;
+    if ((wanted & DMDEVFS_REPORT_BLOCK) != 0 &&
+        dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_BLOCK_GET_INFO, &info) == 0)
+    {
+        classes |= DMDEVFS_REPORT_BLOCK;
+    }
+
+    dmdrvi_close(node->driver_context, handle);
+    return classes;
+}
+
+/**
+ * @brief Report one class of a node to libsystemd, logging unexpected failures
+ *
+ * -ENOENT from libsystemd only means that no rule matches (yet) - libsystemd
+ * remembers the device and replays it once rules are loaded - and -ESRCH on
+ * removal that the unit was not running; neither is an error here.
+ */
+static void report_node_class( const char* device_class, const char* name, const char* abs_path, bool added )
+{
+    int ret = added ? libsystemd_notify_device_added(device_class, name, abs_path)
+                    : libsystemd_notify_device_removed(device_class, name);
+    if (ret != 0 && ret != -ENOENT && ret != -ESRCH)
+    {
+        DMOD_LOG_WARN("libsystemd %s notice for %s device %s failed: %d\n",
+                      added ? "added" : "removed", device_class, name, ret);
+    }
+}
+
+/**
+ * @brief Report a node whose absolute path just became known to libsystemd
+ *
+ * Probes the node (probe_node_classes(), limited by its report= mask) and
+ * reports it under every class it answered to, remembering them in
+ * driver_node_t::reported for report_node_removed(). A node already reported
+ * is left alone.
+ *
+ * Must be called without g_devfs_mutex held: it calls into driver code and
+ * libsystemd, which may synchronously start a service that opens the node.
+ */
+static void report_node_added( const char* abs_path, driver_node_t* node )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    bool already = (node->reported != 0);
+    uint8_t wanted = node->report_mask;
+    dmosi_mutex_unlock(g_devfs_mutex);
+    if (already)
+    {
+        return;
+    }
+
+    uint8_t classes = probe_node_classes(node, wanted);
+    if (classes == 0)
+    {
+        return;
+    }
+
+    dmosi_mutex_lock(g_devfs_mutex);
+    node->reported = classes;
+    dmosi_mutex_unlock(g_devfs_mutex);
+
+    path_t name;
+    build_report_name(node->path, name, sizeof(name));
+    if ((classes & DMDEVFS_REPORT_MONITOR) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_MONITOR, name, abs_path, true);
+    }
+    if ((classes & DMDEVFS_REPORT_BLOCK) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_BLOCK, name, abs_path, true);
+    }
+}
+
+/**
+ * @brief Report the removal of a node to libsystemd, for every class it was reported under
+ *
+ * libsystemd stops the units started for it - gracefully, so this may block
+ * for up to their stop_timeout_ms. Must be called without g_devfs_mutex held.
+ */
+static void report_node_removed( driver_node_t* node )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    uint8_t classes = node->reported;
+    node->reported = 0;
+    dmosi_mutex_unlock(g_devfs_mutex);
+    if (classes == 0)
+    {
+        return;
+    }
+
+    path_t name;
+    build_report_name(node->path, name, sizeof(name));
+    if ((classes & DMDEVFS_REPORT_BLOCK) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_BLOCK, name, NULL, false);
+    }
+    if ((classes & DMDEVFS_REPORT_MONITOR) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_MONITOR, name, NULL, false);
+    }
 }
 
 /**
@@ -2978,6 +3228,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     driver_node_t* owner = (driver_node_t*)dmlist_find(mount->drivers, (void*)context, compare_driver_context);
     dmdrvi_context_t owner_context = owner->driver_context;
     Dmod_Context_t* owner_driver = owner->driver;
+    uint8_t owner_report_mask = owner->report_mask;
     bool owner_has_group = owner->friends_group != NULL;
     bool owner_has_role = owner->friend_role != NULL;
     char* owner_group = owner_has_group ? Dmod_StrDup(owner->friends_group) : NULL;
@@ -3011,6 +3262,8 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     new_node->is_builtin = false;
     new_node->friends_group = owner_group;
     new_node->friend_role = owner_role;
+    new_node->report_mask = owner_report_mask;
+    new_node->reported = 0;
     new_node->open_count = 0;
     new_node->removed = false;
 
@@ -3101,6 +3354,7 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
     // Its metadata remains valid until all callbacks (and any open handles)
     // have released it.
     notify_friends_about_node(mount, node, dmdrvi_dev_state_dead);
+    report_node_removed(node);
 
     release_driver_node_ref(node);
     DMOD_LOG_INFO("Hot-plugged device no longer available: %s\n", removed_path);

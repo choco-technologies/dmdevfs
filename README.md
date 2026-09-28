@@ -12,6 +12,7 @@ DMOD Driver File System - A driver-based file system module for embedded systems
 - **DMFSI Compatible**: Implements the standard DMOD file system interface
 - **DMVFS Integration**: Can be mounted as a file system in DMVFS
 - **Modular Design**: Built on DMOD framework for easy integration
+- **libsystemd Device Reporting**: Reports monitored and block device nodes to libsystemd, so device rules can start services for them (see [libsystemd Device Reporting](#libsystemd-device-reporting))
 
 ## Architecture
 
@@ -148,6 +149,7 @@ parameter2 = value2
 - **`driver_order`**: An integer that controls when the driver is configured relative to other drivers. All drivers with `driver_order = 0` (the default when the field is omitted) are configured before any driver with `driver_order = 1`, which in turn is configured before `driver_order = 2`, and so on. Use this to force a driver to be configured after another one when there is no dmod dependency between them to infer the order from automatically.
 - **`friends_group`**: Groups configurations that form one logical peripheral. Once device paths are available, DMDEVFS reports every other member of the group through the optional driver's `dmdrvi_friend_changed()` callback.
 - **`friend_role`**: Optional application-defined role of this member inside its friends group, such as `chip_select`. It lets consumers distinguish several devices of the same type without relying on section names or generated paths.
+- **`report`**: What this device's nodes may be reported to libsystemd as: `all` (default), `monitor`, `block` or `none`. Hot-plugged nodes inherit it. See [libsystemd Device Reporting](#libsystemd-device-reporting).
 
 Any additional parameters in the configuration file are passed to the driver's initialization function. The interpretation of these parameters depends on the specific driver implementation.
 
@@ -190,6 +192,46 @@ Devices announced later with `dmdrvi_device_available()` inherit their
 owner's group and role and generate a `ready` notification. Removing such a
 device with `dmdrvi_device_unavailable()` generates a `dead` notification.
 Both `friends_group` and the callback are optional.
+
+### libsystemd Device Reporting
+
+Once a node's absolute path is known (after `dmdrvi_path_ready()`, both for
+nodes created by `dmdrvi_create()` and for nodes announced later with
+`dmdrvi_device_available()`), DMDEVFS opens the node read-only through its
+driver and asks what it is:
+
+| Driver answers | Reported as class | Typical rule |
+|----------------|-------------------|--------------|
+| `DMDRVI_IOCTL_MONITOR_GET_POLICY` | `monitor` | `[class=monitor] start=dmdevmon@%name` - the node needs a monitor service (presence detection, hot-plug, polling) |
+| `DMDRVI_IOCTL_BLOCK_GET_INFO` | `block` | `[class=block] start=automount@%name` - a block device |
+
+A node can be reported under both classes, or under none (then nothing
+happens). Each report is `libsystemd_notify_device_added(class, name, path)`:
+
+- **name** - the node path relative to the mount with `/` replaced by `_`,
+  because unit names cannot contain `/`: `/dmsdio0` -> `dmsdio0`,
+  `/dmsdio0/0` -> `dmsdio0_0`. Rules use it as `%name`.
+- **path** - the node's absolute path (e.g. `/dev/dmsdio0/0`), available to
+  the started unit as `%v`.
+
+When the node goes away - `dmdrvi_device_unavailable()`, or the mount being
+torn down - DMDEVFS calls `libsystemd_notify_device_removed()` for every class
+it reported, which stops the matching units. Services that registered for
+graceful stop are given their unit's `stop_timeout_ms` to exit, so the
+removal (and a teardown) may take up to that long.
+
+`-ENOENT` from libsystemd is expected: it only means no rule matches (yet);
+libsystemd remembers the device and starts the units once rules are loaded.
+Drivers therefore never report their nodes to libsystemd themselves.
+
+Use `report=` in a device's configuration to limit or disable this, e.g. for
+raw flash that must never be automounted:
+
+```ini
+[internal_flash]
+driver_name=dmfmc
+report=none
+```
 
 ### Configuration Directory Structure
 
@@ -494,6 +536,11 @@ dmdevfs/
 │   └── dmdevfs.h            # Public header
 ├── src/
 │   └── dmdevfs.c            # Main DMDEVFS implementation
+├── tests/
+│   ├── test_dmdevfs.c       # libsystemd reporting tests (ctest)
+│   ├── mockdrv/             # test-only dmdrvi driver
+│   ├── testsvc/             # test-only service started by libsystemd
+│   └── fixtures/            # config, units and rules for the tests
 ├── CMakeLists.txt           # CMake build configuration
 ├── manifest.dmm             # DMOD manifest file
 ├── README.md                # This file
