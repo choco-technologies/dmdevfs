@@ -71,7 +71,19 @@ and rules (`fixtures/rules`) loaded. Every report DMDEVFS makes therefore
 starts a real `dmdevfs_testsvc` process (`testsvc/`) as `mon@<name>` or
 `blk@<name>`, and every removal stops it - both checked through
 `libsystemd_status()`. It is registered with ctest (it needs `dmf-get` and
-`dmod_loader`), so the build-and-test commands above run it.
+`dmod_loader`), so the build-and-test commands above run it. Both test
+modules use fixture paths relative to this directory (dmdevfs limits
+configuration file paths to 52 bytes), so run them from `tests/` when
+starting `dmod_loader` by hand - ctest already does.
+
+### test_dmdevmon - the dmdevmon monitor loop
+
+`test_dmdevmon.c` runs the loop of `services/dmdevmon` (`src/dmdevmon.c`,
+compiled into the test) on the monitored nodes of `dmdevfs_mockdrv`, mounted
+from `fixtures/monitor`. The mock driver counts the `MONITOR_EVENT` and
+`MONITOR_REFRESH` calls it gets. The service's `main.c` reaches its node
+through the file API, which needs dmvfs - not available on the host loader -
+so the test hands the loop a node that goes straight to the mount instead.
 
 ## Test Coverage
 
@@ -83,6 +95,10 @@ Current automated tests verify:
   `dmdrvi_device_unavailable()` and on teardown
 - Nodes answering neither ioctl, and devices with `report=none` (including
   their hot-plugged children), are not reported
+- dmdevmon: a single refresh and exit without events or polling; rejects
+  nodes that are not monitored or missing; polls at the policy interval;
+  turns an event burst into `EVENT` calls and exactly one refresh; registers
+  the event handler only while it runs; stops promptly when asked
 - Build system integration works correctly
 
 With fs_tester integration:

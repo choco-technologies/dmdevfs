@@ -13,6 +13,7 @@ DMOD Driver File System - A driver-based file system module for embedded systems
 - **DMVFS Integration**: Can be mounted as a file system in DMVFS
 - **Modular Design**: Built on DMOD framework for easy integration
 - **libsystemd Device Reporting**: Reports monitored and block device nodes to libsystemd, so device rules can start services for them (see [libsystemd Device Reporting](#libsystemd-device-reporting))
+- **dmdevmon Service**: Generic monitor service that drives every node implementing the dmdrvi monitor contract - presence detection, hot-plug and polling without driver threads (see [services/dmdevmon](services/dmdevmon/README.md))
 
 ## Architecture
 
@@ -202,7 +203,7 @@ driver and asks what it is:
 
 | Driver answers | Reported as class | Typical rule |
 |----------------|-------------------|--------------|
-| `DMDRVI_IOCTL_MONITOR_GET_POLICY` | `monitor` | `[class=monitor] start=dmdevmon@%name` - the node needs a monitor service (presence detection, hot-plug, polling) |
+| `DMDRVI_IOCTL_MONITOR_GET_POLICY` | `monitor` | `[class=monitor] start=dmdevmon@%name` - the node needs a monitor service (presence detection, hot-plug, polling); [dmdevmon](services/dmdevmon/README.md) ships with this repository |
 | `DMDRVI_IOCTL_BLOCK_GET_INFO` | `block` | `[class=block] start=automount@%name` - a block device |
 
 A node can be reported under both classes, or under none (then nothing
@@ -536,8 +537,11 @@ dmdevfs/
 │   └── dmdevfs.h            # Public header
 ├── src/
 │   └── dmdevfs.c            # Main DMDEVFS implementation
+├── services/
+│   └── dmdevmon/            # generic monitor service (rules + unit in configs/)
 ├── tests/
 │   ├── test_dmdevfs.c       # libsystemd reporting tests (ctest)
+│   ├── test_dmdevmon.c      # dmdevmon monitor loop tests (ctest)
 │   ├── mockdrv/             # test-only dmdrvi driver
 │   ├── testsvc/             # test-only service started by libsystemd
 │   └── fixtures/            # config, units and rules for the tests
