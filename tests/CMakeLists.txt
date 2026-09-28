@@ -53,12 +53,19 @@ add_subdirectory(testsvc)
 
 # Registers a test module with ctest - replays what CI does: install its
 # dependencies, then run it through dmod_loader.
+#
+# The tests run in this directory and use relative fixture paths
+# ("fixtures/..."): dmdevfs limits a configuration file path to
+# MAX_PATH_LENGTH (52 bytes), which an absolute path into the checkout
+# exceeds as soon as the repository sits a few characters deeper (CI:
+# /__w/dmdevfs/dmdevfs/...).
 find_program(DMF_GET_EXECUTABLE dmf-get HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
 find_program(DMOD_LOADER_EXECUTABLE dmod_loader HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
 function(dmdevfs_register_test name)
     if(DMF_GET_EXECUTABLE AND DMOD_LOADER_EXECUTABLE)
         add_test(
             NAME ${name}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             COMMAND ${CMAKE_COMMAND} -E env DMOD_DMF_DIR=${DMOD_DMF_DIR}
                 bash -c "${DMF_GET_EXECUTABLE} install -d ${DMOD_DMF_DIR}/${name}.dmd -y && ${DMOD_LOADER_EXECUTABLE} ${DMOD_DMF_DIR}/${name}.dmf"
         )
@@ -81,7 +88,7 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv
 )
 target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
-    DMDEVFS_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+    DMDEVFS_TEST_FIXTURES_DIR="fixtures"
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
@@ -104,7 +111,7 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../services/dmdevmon/src
 )
 target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
-    DMDEVFS_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+    DMDEVFS_TEST_FIXTURES_DIR="fixtures"
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi

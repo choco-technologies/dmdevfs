@@ -71,7 +71,10 @@ and rules (`fixtures/rules`) loaded. Every report DMDEVFS makes therefore
 starts a real `dmdevfs_testsvc` process (`testsvc/`) as `mon@<name>` or
 `blk@<name>`, and every removal stops it - both checked through
 `libsystemd_status()`. It is registered with ctest (it needs `dmf-get` and
-`dmod_loader`), so the build-and-test commands above run it.
+`dmod_loader`), so the build-and-test commands above run it. Both test
+modules use fixture paths relative to this directory (dmdevfs limits
+configuration file paths to 52 bytes), so run them from `tests/` when
+starting `dmod_loader` by hand - ctest already does.
 
 ### test_dmdevmon - the dmdevmon monitor loop
 
