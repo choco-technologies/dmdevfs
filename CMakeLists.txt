@@ -82,12 +82,16 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
 )
 
 # Link to other DMOD modules (will be downloaded on build time)
+# dmdrvi 2.1: DMDRVI_IOCTL_MONITOR_* (node reporting, see src/dmdevfs.c).
+# libsystemd: nodes are reported as "monitor"/"block" devices so device rules
+# can start services (dmdevmon, automount) for them.
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
-    dmdrvi
+    dmdrvi@>=2.1
     dmini
     dmlist
     dmosi
+    libsystemd
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE

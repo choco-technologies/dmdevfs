@@ -63,11 +63,26 @@ cmake --build .
 ./tests/fs_tester --read-only-fs path/to/dmdevfs.dmf
 ```
 
+### test_dmdevfs - libsystemd device reporting
+
+`test_dmdevfs.c` mounts DMDEVFS from `fixtures/config` with the test driver
+`dmdevfs_mockdrv` (`mockdrv/`), with libsystemd's units (`fixtures/units`)
+and rules (`fixtures/rules`) loaded. Every report DMDEVFS makes therefore
+starts a real `dmdevfs_testsvc` process (`testsvc/`) as `mon@<name>` or
+`blk@<name>`, and every removal stops it - both checked through
+`libsystemd_status()`. It is registered with ctest (it needs `dmf-get` and
+`dmod_loader`), so the build-and-test commands above run it.
+
 ## Test Coverage
 
 Current automated tests verify:
 - Module compilation succeeds
 - Module output files are generated
+- A monitored node is reported as `monitor`, and its removal on teardown
+- A hot-plugged block node is reported as `block`, and its removal on
+  `dmdrvi_device_unavailable()` and on teardown
+- Nodes answering neither ioctl, and devices with `report=none` (including
+  their hot-plugged children), are not reported
 - Build system integration works correctly
 
 With fs_tester integration:
