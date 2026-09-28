@@ -79,6 +79,7 @@ set(DMOD_MAL_IMPLS         dmdrvi)
 dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     # List of source files - can include C and C++ files
     src/dmdevfs.c
+    src/partitions.c
 )
 
 # Link to other DMOD modules (will be downloaded on build time)

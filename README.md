@@ -13,6 +13,7 @@ DMOD Driver File System - A driver-based file system module for embedded systems
 - **DMVFS Integration**: Can be mounted as a file system in DMVFS
 - **Modular Design**: Built on DMOD framework for easy integration
 - **libsystemd Device Reporting**: Reports monitored and block device nodes to libsystemd, so device rules can start services for them (see [libsystemd Device Reporting](#libsystemd-device-reporting))
+- **Partition Nodes**: Exposes the MBR (incl. extended/logical) and GPT partitions of block devices as their own nodes (`<node>p<N>`), with offsets translated by DMDEVFS (see [Partition Nodes](#partition-nodes))
 - **dmdevmon Service**: Generic monitor service that drives every node implementing the dmdrvi monitor contract - presence detection, hot-plug and polling without driver threads (see [services/dmdevmon](services/dmdevmon/README.md))
 
 ## Architecture
@@ -233,6 +234,50 @@ raw flash that must never be automounted:
 driver_name=dmfmc
 report=none
 ```
+
+### Partition Nodes
+
+Whenever a node that answers `DMDRVI_IOCTL_BLOCK_GET_INFO` becomes
+available - at mount, when a pending configuration becomes ready, or when a
+driver announces it with `dmdrvi_device_available()` - DMDEVFS reads its
+partition table and creates one node per partition next to it:
+
+```
+/dev/dmsdio0/0      whole medium
+/dev/dmsdio0/0p1    partition 1
+/dev/dmsdio0/0p2    partition 2
+```
+
+| Table | Detected by | Numbers |
+|-------|-------------|---------|
+| MBR | `0x55AA` signature, valid status bytes, entries inside the medium; a FAT boot sector (superfloppy) is *not* taken for an MBR | primaries `1`-`4` by slot (empty slots leave gaps), logical partitions of an extended partition (`0x05`, `0x0F`, `0x85`) from `5` in chain order |
+| GPT | protective MBR (`0xEE`), then the `EFI PART` header at LBA 1 with valid header and entry array CRC32; if the primary header is damaged, the backup at the last LBA | entry index + 1 |
+
+A medium without a valid table (blank, superfloppy, damaged GPT with both
+headers corrupted) gets no partition nodes - the whole-medium node is the
+only one, as before. Block sizes of 512 to 4096 bytes are supported.
+
+A partition node uses the driver of its medium; DMDEVFS only translates:
+
+- **read/write** - offsets are shifted by the partition start (64-bit, so
+  partitions above 4 GiB work). A read at or past the partition end returns
+  0 bytes, a longer one is clipped; a write past the end fails with
+  `DMFSI_ERR_NO_SPACE`, a longer one is clipped.
+- **stat** - the size is the partition length.
+- **ioctl** - `DMDRVI_IOCTL_BLOCK_GET_INFO` reports the partition's
+  `block_count`; `DMDRVI_IOCTL_BLOCK_ERASE`/`_DISCARD` are range-checked
+  against the partition (`-EINVAL` outside) and shifted. Every other request
+  returns `-ENOTTY`, so medium-wide operations (e.g. monitor ioctls) are only
+  possible on the whole-medium node.
+
+Partition nodes are reported to libsystemd as `block` (never `monitor`,
+subject to the medium's `report=`), named like any other node:
+`/dmsdio0/0p1` -> `dmsdio0_0p1`. When the medium goes away
+(`dmdrvi_device_unavailable()` or teardown), its partitions are removed - and
+reported removed - before the medium itself.
+
+The table is read once, when the node appears. Repartitioning a medium that
+stays present is not picked up until it is removed and announced again.
 
 ### Configuration Directory Structure
 
@@ -536,12 +581,14 @@ dmdevfs/
 ├── include/
 │   └── dmdevfs.h            # Public header
 ├── src/
-│   └── dmdevfs.c            # Main DMDEVFS implementation
+│   ├── dmdevfs.c            # Main DMDEVFS implementation
+│   └── partitions.c/.h      # MBR/GPT partition table parser
 ├── services/
 │   └── dmdevmon/            # generic monitor service (rules + unit in configs/)
 ├── tests/
 │   ├── test_dmdevfs.c       # libsystemd reporting tests (ctest)
 │   ├── test_dmdevmon.c      # dmdevmon monitor loop tests (ctest)
+│   ├── test_partitions.c    # partition node tests (ctest)
 │   ├── mockdrv/             # test-only dmdrvi driver
 │   ├── testsvc/             # test-only service started by libsystemd
 │   └── fixtures/            # config, units and rules for the tests

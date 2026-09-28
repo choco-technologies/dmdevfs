@@ -85,6 +85,16 @@ from `fixtures/monitor`. The mock driver counts the `MONITOR_EVENT` and
 through the file API, which needs dmvfs - not available on the host loader -
 so the test hands the loop a node that goes straight to the mount instead.
 
+### test_partitions - partition nodes
+
+`test_partitions.c` mounts `fixtures/partitions` (one `dmdevfs_mockdrv`
+device whose child is a sparse, in-memory block medium). While the device is
+unplugged, the test sizes the medium (`DMDEVFS_MOCKDRV_IOCTL_SET_MEDIA`) and
+writes MBR/GPT images into it sector by sector
+(`DMDEVFS_MOCKDRV_IOCTL_WRITE_SECTOR`); plugging it in makes DMDEVFS scan the
+table. The reporting step loads `fixtures/units` and `fixtures/rules`, and
+`fixtures/norules` (an empty rules directory) at the end to drop them again.
+
 ## Test Coverage
 
 Current automated tests verify:
@@ -99,6 +109,12 @@ Current automated tests verify:
   nodes that are not monitored or missing; polls at the policy interval;
   turns an event burst into `EVENT` calls and exactly one refresh; registers
   the event handler only while it runs; stops promptly when asked
+- Partition nodes: MBR primaries (incl. all four slots), extended with a
+  logical chain, GPT (primary, backup when the primary is corrupted, none
+  when both are); no nodes for a superfloppy or a blank medium; I/O shifted
+  above 4 GiB and clipped at the partition end; size from stat; block ioctls
+  translated and others refused; reported as `block` and withdrawn before
+  their medium when it is unplugged
 - Build system integration works correctly
 
 With fs_tester integration:
