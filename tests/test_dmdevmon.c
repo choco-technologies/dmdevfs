@@ -157,15 +157,30 @@ static bool start(runner_t* runner, const char* node)
     return runner->thread != NULL;
 }
 
-/** What libsystemd does: raise the stop flag, post the wakeup semaphore once. */
-static void stop(runner_t* runner)
+/**
+ * What libsystemd does: raise the stop flag, post the wakeup semaphore once.
+ *
+ * Waits a bounded time for the loop to return before joining, so a loop that
+ * does not stop fails the step instead of hanging the whole test run (the
+ * thread and monitor are then deliberately left alone).
+ */
+static bool stop(runner_t* runner)
 {
     g_stop = true;
     dmosi_semaphore_post(dmdevmon_get_wakeup(runner->monitor), 1);
+    for (int waited = 0; waited < WAIT_MS && !runner->done; waited += 5)
+    {
+        dmosi_thread_sleep(5);
+    }
+    if (!runner->done)
+    {
+        return false;
+    }
     dmosi_thread_join(runner->thread);
     dmosi_thread_destroy(runner->thread);
     dmdevmon_destroy(runner->monitor);
     runner->monitor = NULL;
+    return true;
 }
 
 /* ---- steps ---- */
@@ -198,7 +213,7 @@ DMOD_TEST_STEP(dmdevmon_polls_at_the_policy_interval)
     runner_t runner;
     DMOD_TEST_EXPECT_TRUE(start(&runner, NODE_POLLING));
     dmosi_thread_sleep(290);                            /* 50 ms interval */
-    stop(&runner);
+    DMOD_TEST_EXPECT_TRUE(stop(&runner));
     DMOD_TEST_EXPECT_TRUE(runner.done);
     DMOD_TEST_EXPECT_EQ(runner.ret, 0);
     dmdevfs_mockdrv_stats_t s = stats(NODE_POLLING);
@@ -221,7 +236,7 @@ DMOD_TEST_STEP(dmdevmon_settles_an_event_burst_into_one_refresh)
     DMOD_TEST_EXPECT_TRUE(wait_refreshes(NODE_EVENTS, 2));
     dmosi_thread_sleep(150);                                   /* nothing else follows */
     dmdevfs_mockdrv_stats_t s = stats(NODE_EVENTS);
-    stop(&runner);
+    DMOD_TEST_EXPECT_TRUE(stop(&runner));
 
     DMOD_TEST_EXPECT_EQ(s.refreshes, 2u);
     DMOD_TEST_EXPECT_TRUE(s.events >= 1u);                     /* EVENT before settling */
@@ -235,7 +250,7 @@ DMOD_TEST_STEP(dmdevmon_registers_event_handler_only_while_alive)
     DMOD_TEST_EXPECT_TRUE(start(&runner, NODE_EVENTS));
     DMOD_TEST_EXPECT_NOT_NULL(dmhaman_get_handler(EVENT_HANDLER));
 
-    stop(&runner);
+    DMOD_TEST_EXPECT_TRUE(stop(&runner));
     DMOD_TEST_EXPECT_NULL(dmhaman_get_handler(EVENT_HANDLER));
 }
 
@@ -246,7 +261,7 @@ DMOD_TEST_STEP(dmdevmon_stops_promptly_when_asked)
     DMOD_TEST_EXPECT_TRUE(wait_refreshes(NODE_EVENTS, 1));
 
     uint64_t begin = (uint64_t)Dmod_GetUptime();
-    stop(&runner);
+    DMOD_TEST_EXPECT_TRUE(stop(&runner));
     uint64_t elapsed = (uint64_t)Dmod_GetUptime() - begin;
 
     DMOD_TEST_EXPECT_TRUE(runner.done);

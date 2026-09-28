@@ -3,6 +3,7 @@
 #include "dmod_test.h"
 #include "dmfsi.h"
 #include "dmosi.h"
+#include "dmhaman.h"
 #include "libsystemd.h"
 #include "dmdevfs_mockdrv.h"
 #include <errno.h>
@@ -17,6 +18,10 @@
  * blk@<name> ("block"), and every removal stops it again - both observable
  * through libsystemd_status(). A unit that was never reported does not exist
  * at all (-ENOENT).
+ *
+ * A unit is only ever stopped once its service is fully up (wait_ready()):
+ * killing a process still starting up inside the loader can leave a global
+ * loader lock held and hang every later module operation.
  */
 
 #ifndef DMDEVFS_TEST_FIXTURES_DIR
@@ -55,6 +60,8 @@ static bool load_devfs(void)
     return g_fs.init && g_fs.deinit && g_fs.mounted && g_fs.fopen && g_fs.fclose && g_fs.ioctl;
 }
 
+static bool wait_ready(const char* unit, const char* path);
+
 void dmod_test_setup(void)
 {
     if (!g_ready)
@@ -67,6 +74,9 @@ void dmod_test_setup(void)
     if (g_mount != NULL)
     {
         g_fs.mounted(g_mount, "/dev");
+        /* Every mount starts mon@dmdevfs_mockdrv0 - let it come up before
+         * any step (or the teardown) may stop it. */
+        wait_ready("mon@dmdevfs_mockdrv0", "/dev/dmdevfs_mockdrv0");
     }
 }
 
@@ -99,6 +109,27 @@ static bool wait_state(const char* unit, dmosi_process_state_t state)
     return false;
 }
 
+/**
+ * Wait until @p unit is running and its service is set up (it registers a
+ * dmhaman handler named after its node path, see testsvc/testsvc.c).
+ */
+static bool wait_ready(const char* unit, const char* path)
+{
+    if (!wait_state(unit, DMOSI_PROCESS_STATE_RUNNING))
+    {
+        return false;
+    }
+    for (int waited = 0; waited < WAIT_MS; waited += 10)
+    {
+        if (dmhaman_get_handler(path) != NULL)
+        {
+            return true;
+        }
+        dmosi_thread_sleep(10);
+    }
+    return false;
+}
+
 /** Plug or unplug the block child of /dev/dmdevfs_mockdrv<major> through dmdevfs. */
 static int set_plugged(const char* host, bool plugged)
 {
@@ -115,7 +146,7 @@ static int set_plugged(const char* host, bool plugged)
 DMOD_TEST_STEP(dmdevfs_reports_monitored_node_and_its_removal)
 {
     DMOD_TEST_EXPECT_NOT_NULL(g_mount);
-    DMOD_TEST_EXPECT_TRUE(wait_state("mon@dmdevfs_mockdrv0", DMOSI_PROCESS_STATE_RUNNING));
+    DMOD_TEST_EXPECT_TRUE(wait_ready("mon@dmdevfs_mockdrv0", "/dev/dmdevfs_mockdrv0"));
 
     g_fs.deinit(g_mount);
     g_mount = NULL;
@@ -125,7 +156,7 @@ DMOD_TEST_STEP(dmdevfs_reports_monitored_node_and_its_removal)
 DMOD_TEST_STEP(dmdevfs_skips_opted_out_and_unmonitored_nodes)
 {
     DMOD_TEST_EXPECT_NOT_NULL(g_mount);
-    DMOD_TEST_EXPECT_TRUE(wait_state("mon@dmdevfs_mockdrv0", DMOSI_PROCESS_STATE_RUNNING));
+    DMOD_TEST_EXPECT_TRUE(wait_ready("mon@dmdevfs_mockdrv0", "/dev/dmdevfs_mockdrv0"));
     DMOD_TEST_EXPECT_EQ(unit_state("mon@dmdevfs_mockdrv1"), -1);    /* report=none */
     DMOD_TEST_EXPECT_EQ(unit_state("mon@dmdevfs_mockdrv2"), -1);    /* no GET_POLICY */
     DMOD_TEST_EXPECT_EQ(unit_state("blk@dmdevfs_mockdrv0"), -1);    /* host node is no block device */
@@ -135,7 +166,7 @@ DMOD_TEST_STEP(dmdevfs_reports_hot_plugged_block_node_and_its_removal)
 {
     DMOD_TEST_EXPECT_NOT_NULL(g_mount);
     DMOD_TEST_EXPECT_EQ(set_plugged("/dmdevfs_mockdrv0", true), 0);
-    DMOD_TEST_EXPECT_TRUE(wait_state("blk@dmdevfs_mockdrv0_0", DMOSI_PROCESS_STATE_RUNNING));
+    DMOD_TEST_EXPECT_TRUE(wait_ready("blk@dmdevfs_mockdrv0_0", "/dev/dmdevfs_mockdrv0/0"));
     DMOD_TEST_EXPECT_EQ(unit_state("mon@dmdevfs_mockdrv0_0"), -1);  /* child has no GET_POLICY */
 
     DMOD_TEST_EXPECT_EQ(set_plugged("/dmdevfs_mockdrv0", false), 0);
@@ -147,7 +178,7 @@ DMOD_TEST_STEP(dmdevfs_hot_plugged_node_inherits_report_setting)
     DMOD_TEST_EXPECT_NOT_NULL(g_mount);
     DMOD_TEST_EXPECT_EQ(set_plugged("/dmdevfs_mockdrv1", true), 0);  /* report=none */
     DMOD_TEST_EXPECT_EQ(set_plugged("/dmdevfs_mockdrv2", true), 0);  /* default: all */
-    DMOD_TEST_EXPECT_TRUE(wait_state("blk@dmdevfs_mockdrv2_0", DMOSI_PROCESS_STATE_RUNNING));
+    DMOD_TEST_EXPECT_TRUE(wait_ready("blk@dmdevfs_mockdrv2_0", "/dev/dmdevfs_mockdrv2/0"));
     DMOD_TEST_EXPECT_EQ(unit_state("blk@dmdevfs_mockdrv1_0"), -1);
 }
 
@@ -155,7 +186,7 @@ DMOD_TEST_STEP(dmdevfs_reports_removal_of_plugged_node_on_teardown)
 {
     DMOD_TEST_EXPECT_NOT_NULL(g_mount);
     DMOD_TEST_EXPECT_EQ(set_plugged("/dmdevfs_mockdrv2", true), 0);
-    DMOD_TEST_EXPECT_TRUE(wait_state("blk@dmdevfs_mockdrv2_0", DMOSI_PROCESS_STATE_RUNNING));
+    DMOD_TEST_EXPECT_TRUE(wait_ready("blk@dmdevfs_mockdrv2_0", "/dev/dmdevfs_mockdrv2/0"));
 
     g_fs.deinit(g_mount);   /* no unplug: teardown alone must report it */
     g_mount = NULL;

@@ -69,6 +69,8 @@ function(dmdevfs_register_test name)
             COMMAND ${CMAKE_COMMAND} -E env DMOD_DMF_DIR=${DMOD_DMF_DIR}
                 bash -c "${DMF_GET_EXECUTABLE} install -d ${DMOD_DMF_DIR}/${name}.dmd -y && ${DMOD_LOADER_EXECUTABLE} ${DMOD_DMF_DIR}/${name}.dmf"
         )
+        # A hang must fail the run (with its output), not stall CI.
+        set_tests_properties(${name} PROPERTIES TIMEOUT 180)
     else()
         message(WARNING "dmf-get/dmod_loader not found - 'ctest' will not run ${name}")
     endif()
@@ -92,6 +94,7 @@ target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
+    dmhaman
     dmosi
     libsystemd
 )
