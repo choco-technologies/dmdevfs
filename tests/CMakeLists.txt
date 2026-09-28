@@ -124,6 +124,26 @@ dmod_link_modules(${DMOD_MODULE_NAME}
 )
 dmdevfs_register_test(${DMOD_MODULE_NAME})
 
+# test_partitions - partition nodes (MBR/GPT) on the test driver's medium
+set(DMOD_MODULE_NAME        test_partitions)
+dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
+    test_partitions.c
+)
+target_include_directories(${DMOD_MODULE_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv
+)
+target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
+    DMDEVFS_TEST_FIXTURES_DIR="fixtures"
+)
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmfsi
+    dmdrvi@>=2.1
+    dmhaman
+    dmosi
+    libsystemd
+)
+dmdevfs_register_test(${DMOD_MODULE_NAME})
+
 # Print information about tests
 message(STATUS "DMDEVFS tests configured")
 message(STATUS "  Module output directory: ${CMAKE_BINARY_DIR}/dmf")

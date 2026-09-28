@@ -17,6 +17,7 @@
 #include "dmdrvi.h"
 #include "dmosi.h"
 #include "libsystemd.h"
+#include "partitions.h"
 #include <errno.h>
 #include <string.h>
 
@@ -131,6 +132,12 @@ typedef struct
     bool is_builtin;                    // True for devices implemented directly by dmdevfs (e.g. the "null"
                                          // device) rather than backed by a loaded dmdrvi driver module; driver
                                          // and driver_context are unused (NULL) for these nodes.
+    bool is_partition;                  // True for a partition of a block node (see scan_partitions()): shares
+                                         // driver, driver_context and dev_num with that node, I/O is shifted by
+                                         // part_offset and clipped to part_length. Never passed to dmdrvi_free().
+    dmdrvi_offset_t part_offset;        // Partition start on the parent device, in bytes (is_partition only)
+    dmdrvi_size_t part_length;          // Partition size in bytes (is_partition only)
+    char* parent_path;                  // Owned copy of the parent node's path - its dmdrvi_stat() path (is_partition only)
     char* friends_group;                // Optional friends_group copied from the owning configuration.
     char* friend_role;                  // Optional friend_role copied from the owning configuration.
     path_t path;                        // Path associated with the driver
@@ -322,6 +329,11 @@ static void notify_driver_path_ready( const char* mount_path, driver_node_t* nod
 static uint8_t read_report_mask( dmini_context_t config_ctx, const char* section_name, const char* driver_name );
 static void report_node_added( const char* abs_path, driver_node_t* node );
 static void report_node_removed( driver_node_t* node );
+static bool map_node_offset( const driver_node_t* node, dmfsi_offset_t offset, size_t* size, dmdrvi_offset_t* device_offset );
+static int write_to_driver( file_handle_t* handle, const void* buffer, size_t size, dmdrvi_ssize_t* bytes_written );
+static int partition_ioctl( file_handle_t* handle, dmod_dmdrvi_ioctl_t dmdrvi_ioctl, int request, void* arg );
+static void scan_partitions( dmfsi_context_t mount, const char* mount_path, driver_node_t* node );
+static void remove_partitions_of( dmfsi_context_t mount, const dynamic_device_lookup_t* lookup );
 static bool notify_all_drivers_path_ready( void* data, void* user_data );
 static void notify_friends_about_node( dmfsi_context_t mount, driver_node_t* node, dmdrvi_dev_state_t state );
 static bool notify_friend_recipient( void* data, void* user_data );
@@ -692,8 +704,13 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
             return DMFSI_ERR_NOT_FOUND;
         }
 
+        // A partition is a window onto its parent device: shift, clip, EOF at its end.
+        size_t request = size;
+        dmdrvi_offset_t device_offset = 0;
         // dmdrvi_read (2.0) returns bytes read, zero at EOF, or a negative errno
-        bytes_read = dmdrvi_read(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
+        bytes_read = map_node_offset(handle->driver, handle->offset, &request, &device_offset)
+                   ? dmdrvi_read(handle->driver->driver_context, handle->driver_handle, buffer, request, device_offset)
+                   : 0;
         if(bytes_read < 0)
         {
             if(read) *read = 0;
@@ -726,30 +743,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
     
     file_handle_t* handle = (file_handle_t*)fp;
 
-    dmdrvi_ssize_t bytes_written;
-    if(handle->driver->is_builtin)
+    dmdrvi_ssize_t bytes_written = (dmdrvi_ssize_t)size;   // /dev/null: silently discard the data, report it all as written
+    int result = handle->driver->is_builtin ? DMFSI_OK : write_to_driver(handle, buffer, size, &bytes_written);
+    if(result != DMFSI_OK)
     {
-        // /dev/null: silently discard the data, report it all as written
-        bytes_written = (dmdrvi_ssize_t)size;
-    }
-    else
-    {
-        // Get the dmdrvi_write function
-        dmod_dmdrvi_write_t dmdrvi_write = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_write_sig);
-        if(dmdrvi_write == NULL)
-        {
-            DMOD_LOG_ERROR("Driver does not implement dmdrvi_write\n");
-            if(written) *written = 0;
-            return DMFSI_ERR_NOT_FOUND;
-        }
-
-        // dmdrvi_write (2.0) returns bytes written or a negative errno
-        bytes_written = dmdrvi_write(handle->driver->driver_context, handle->driver_handle, buffer, size, handle->offset);
-        if(bytes_written < 0)
-        {
-            if(written) *written = 0;
-            return DMFSI_ERR_GENERAL;
-        }
+        if(written) *written = 0;
+        return result;
     }
     if(written) *written = (size_t)bytes_written;
     handle->offset += bytes_written;
@@ -841,6 +840,11 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx,
     {
         DMOD_LOG_ERROR("Driver does not implement dmdrvi_ioctl\n");
         return DMFSI_ERR_NOT_FOUND;
+    }
+
+    if(handle->driver->is_partition)
+    {
+        return partition_ioctl(handle, dmdrvi_ioctl, request, arg);
     }
 
     /* ioctl belongs to the driver: preserve its negative errno for callers. */
@@ -1516,6 +1520,10 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->was_enabled = was_enabled;
     driver_node->is_dynamic = false;
     driver_node->is_builtin = false;
+    driver_node->is_partition = false;
+    driver_node->part_offset = 0;
+    driver_node->part_length = 0;
+    driver_node->parent_path = NULL;
     driver_node->friends_group = NULL;
     driver_node->friend_role = NULL;
     driver_node->report_mask = read_report_mask(config_ctx, section_name, driver_name);
@@ -1834,6 +1842,7 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     {
         notify_driver_path_ready(mount_path, driver_node);
         notify_friends_about_node(ctx, driver_node, dmdrvi_dev_state_ready);
+        scan_partitions(ctx, mount_path, driver_node);
     }
 
     entry->configured = true;
@@ -1914,7 +1923,7 @@ static int unconfigure_drivers(dmfsi_context_t ctx)
             // owns them (created via dmdrvi_create) - only the owner may free the context
             // or release the module, otherwise it would be freed/unloaded more than once.
             // Built-in nodes never had a module to begin with.
-            if (!driver_node->is_dynamic && !driver_node->is_builtin)
+            if (!driver_node->is_dynamic && !driver_node->is_builtin && !driver_node->is_partition)
             {
                 dmod_dmdrvi_free_t dmdrvi_free = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_free_sig);
                 if (dmdrvi_free != NULL)
@@ -2560,6 +2569,17 @@ static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t*
         return DMFSI_ERR_NOT_FOUND;
     }
 
+    if (context->is_partition)
+    {
+        // The driver only knows the whole device: its mode, our size.
+        int result = dmdrvi_stat(context->driver_context, context->parent_path, stat);
+        if (result == 0)
+        {
+            stat->size = context->part_length;
+        }
+        return result;
+    }
+
     return dmdrvi_stat(context->driver_context, path, stat);
 }
 
@@ -2599,7 +2619,7 @@ static bool dev_num_equal( const dmdrvi_dev_num_t* a, const dmdrvi_dev_num_t* b 
 static int compare_driver_context( const void* data, const void* user_data )
 {
     const driver_node_t* node = (const driver_node_t*)data;
-    if (node == NULL || user_data == NULL)
+    if (node == NULL || user_data == NULL || node->is_partition)
     {
         return -1;
     }
@@ -2942,7 +2962,10 @@ static void report_node_added( const char* abs_path, driver_node_t* node )
         return;
     }
 
-    uint8_t classes = probe_node_classes(node, wanted);
+    // A partition is a block device by construction; its driver only knows
+    // the whole device, so it is not probed.
+    uint8_t classes = node->is_partition ? (uint8_t)(wanted & DMDEVFS_REPORT_BLOCK)
+                                         : probe_node_classes(node, wanted);
     if (classes == 0)
     {
         return;
@@ -2993,6 +3016,307 @@ static void report_node_removed( driver_node_t* node )
     }
 }
 
+// ============================================================================
+//                      Partitions
+// ============================================================================
+
+/**
+ * @brief Map a request at @p offset on a node to its device offset
+ *
+ * Identity for ordinary nodes. For a partition the offset is shifted by
+ * part_offset and @p size is clipped to the partition's end.
+ *
+ * @return false when @p offset is at or past the end of the partition.
+ */
+static bool map_node_offset( const driver_node_t* node, dmfsi_offset_t offset, size_t* size, dmdrvi_offset_t* device_offset )
+{
+    if (!node->is_partition)
+    {
+        *device_offset = offset;
+        return true;
+    }
+    if (offset < 0 || (dmdrvi_size_t)offset >= node->part_length)
+    {
+        return false;
+    }
+    dmdrvi_size_t left = node->part_length - (dmdrvi_size_t)offset;
+    if ((dmdrvi_size_t)*size > left)
+    {
+        *size = (size_t)left;
+    }
+    *device_offset = node->part_offset + offset;
+    return true;
+}
+
+/**
+ * @brief Write through the node's driver at the handle's offset
+ *
+ * A partition is a window onto its parent device: the offset is shifted, the
+ * size clipped, and nothing is written past its end.
+ *
+ * @return DMFSI_OK with @p bytes_written set, or a DMFSI error code.
+ */
+static int write_to_driver( file_handle_t* handle, const void* buffer, size_t size, dmdrvi_ssize_t* bytes_written )
+{
+    dmod_dmdrvi_write_t dmdrvi_write = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_write_sig);
+    if(dmdrvi_write == NULL)
+    {
+        DMOD_LOG_ERROR("Driver does not implement dmdrvi_write\n");
+        return DMFSI_ERR_NOT_FOUND;
+    }
+
+    size_t request = size;
+    dmdrvi_offset_t device_offset = 0;
+    if(!map_node_offset(handle->driver, handle->offset, &request, &device_offset))
+    {
+        return DMFSI_ERR_NO_SPACE;
+    }
+    // dmdrvi_write (2.0) returns bytes written or a negative errno
+    *bytes_written = dmdrvi_write(handle->driver->driver_context, handle->driver_handle, buffer, request, device_offset);
+    return (*bytes_written < 0) ? DMFSI_ERR_GENERAL : DMFSI_OK;
+}
+
+/**
+ * @brief ioctl on a partition node
+ *
+ * Only the standard block commands make sense on a partition, translated to
+ * its window: GET_INFO reports the partition's block count, ERASE/DISCARD
+ * ranges must lie inside the partition and are shifted onto the device.
+ * Everything else (monitor and driver private commands) would act on the
+ * whole device and is refused with -ENOTTY.
+ */
+static int partition_ioctl( file_handle_t* handle, dmod_dmdrvi_ioctl_t dmdrvi_ioctl, int request, void* arg )
+{
+    driver_node_t* node = handle->driver;
+    if (request == DMDRVI_IOCTL_BLOCK_GET_INFO)
+    {
+        dmdrvi_block_info_t* info = (dmdrvi_block_info_t*)arg;
+        int ret = (info != NULL) ? dmdrvi_ioctl(node->driver_context, handle->driver_handle, request, info) : -EINVAL;
+        if (ret == 0 && info->logical_block_size != 0)
+        {
+            info->block_count = node->part_length / info->logical_block_size;
+        }
+        return ret;
+    }
+    if (request == DMDRVI_IOCTL_BLOCK_ERASE || request == DMDRVI_IOCTL_BLOCK_DISCARD)
+    {
+        const dmdrvi_block_range_t* range = (const dmdrvi_block_range_t*)arg;
+        if (range == NULL || range->offset < 0 || (dmdrvi_size_t)range->offset > node->part_length ||
+            range->length > node->part_length - (dmdrvi_size_t)range->offset)
+        {
+            return -EINVAL;
+        }
+        dmdrvi_block_range_t device_range = { .offset = range->offset + node->part_offset, .length = range->length };
+        return dmdrvi_ioctl(node->driver_context, handle->driver_handle, request, &device_range);
+    }
+    return -ENOTTY;
+}
+
+/**
+ * @brief State of one scan_partitions() pass
+ */
+typedef struct
+{
+    driver_node_t*      parent;
+    dmod_dmdrvi_read_t  read;
+    void*               handle;      // Driver handle on the parent device
+    uint32_t            block_size;
+    dmlist_context_t*   found;       // New partition nodes, not yet published
+} partition_scan_t;
+
+/**
+ * @brief dmdevfs_part_read_t through the parent's driver
+ */
+static int partition_read( void* ctx, uint64_t offset, void* buffer, size_t size )
+{
+    partition_scan_t* scan = (partition_scan_t*)ctx;
+    dmdrvi_ssize_t ret = scan->read(scan->parent->driver_context, scan->handle, buffer, size, (dmdrvi_offset_t)offset);
+    return (ret == (dmdrvi_ssize_t)size) ? 0 : -EIO;
+}
+
+/**
+ * @brief Create the node of partition @p number of @p parent ("<parent path>p<number>")
+ */
+static driver_node_t* create_partition_node( const driver_node_t* parent, uint32_t number, uint64_t offset, uint64_t length )
+{
+    driver_node_t* node = Dmod_Malloc(sizeof(driver_node_t));
+    if (node == NULL)
+    {
+        return NULL;
+    }
+    memset(node, 0, sizeof(*node));
+    node->driver_context = parent->driver_context;
+    node->driver = parent->driver;
+    node->dev_num = parent->dev_num;
+    node->is_partition = true;
+    node->part_offset = (dmdrvi_offset_t)offset;
+    node->part_length = (dmdrvi_size_t)length;
+    node->report_mask = parent->report_mask;
+    node->parent_path = Dmod_StrDup(parent->path);
+
+    int written = Dmod_SnPrintf(node->path, sizeof(node->path), "%sp%u", parent->path, (unsigned)number);
+    if (node->parent_path == NULL || written < 0 || (size_t)written >= sizeof(node->path))
+    {
+        free_driver_node(node);
+        return NULL;
+    }
+    return node;
+}
+
+/**
+ * @brief dmdevfs_part_found_t collecting partition nodes
+ */
+static bool on_partition_found( void* ctx, uint32_t number, uint64_t first_lba, uint64_t lba_count )
+{
+    partition_scan_t* scan = (partition_scan_t*)ctx;
+    driver_node_t* node = create_partition_node(scan->parent, number,
+                                                first_lba * scan->block_size, lba_count * scan->block_size);
+    if (node == NULL || !dmlist_push_back(scan->found, node))
+    {
+        DMOD_LOG_ERROR("Failed to create node for partition %u of %s\n", (unsigned)number, scan->parent->path);
+        free_driver_node(node);
+    }
+    return true;
+}
+
+/**
+ * @brief Read the partition table of a block node through its driver
+ *
+ * @return List of new (unpublished) partition nodes, or NULL when the node is
+ *         no block device or cannot be read. Empty for a medium without a
+ *         partition table.
+ */
+static dmlist_context_t* find_partitions( driver_node_t* node )
+{
+    dmod_dmdrvi_open_t dmdrvi_open = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_open_sig);
+    dmod_dmdrvi_ioctl_t dmdrvi_ioctl = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_ioctl_sig);
+    dmod_dmdrvi_read_t dmdrvi_read = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_read_sig);
+    dmod_dmdrvi_close_t dmdrvi_close = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_close_sig);
+    if (dmdrvi_open == NULL || dmdrvi_ioctl == NULL || dmdrvi_read == NULL || dmdrvi_close == NULL)
+    {
+        return NULL;
+    }
+
+    void* handle = dmdrvi_open(node->driver_context, DMDRVI_O_RDONLY, &node->dev_num);
+    if (handle == NULL)
+    {
+        return NULL;
+    }
+    dmlist_context_t* found = NULL;
+    dmdrvi_block_info_t info;
+    if (dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_BLOCK_GET_INFO, &info) == 0 &&
+        (found = dmlist_create()) != NULL)
+    {
+        partition_scan_t scan = { node, dmdrvi_read, handle, info.logical_block_size, found };
+        dmdevfs_partitions_scan(partition_read, &scan, info.logical_block_size, info.block_count,
+                                on_partition_found, &scan);
+    }
+    dmdrvi_close(node->driver_context, handle);
+    return found;
+}
+
+/**
+ * @brief Insert one partition node into its (still live) mount and report it
+ */
+static void publish_partition( dmfsi_context_t mount, const char* mount_path, driver_node_t* partition )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    // Only compared, never dereferenced, until proven live (see process_device_available()).
+    bool live = dmlist_find(g_dmdevfs_mounts, mount, compare_mount_context) != NULL;
+    bool taken = live && dmlist_find(mount->drivers, partition->path, compare_driver_node_path) != NULL;
+    bool inserted = live && !taken && dmlist_push_back(mount->drivers, partition);
+    dmosi_mutex_unlock(g_devfs_mutex);
+
+    if (!inserted)
+    {
+        free_driver_node(partition);
+        return;
+    }
+    path_t abs_path;
+    if (build_absolute_path(mount_path, partition->path, abs_path, sizeof(abs_path)) == 0)
+    {
+        report_node_added(abs_path, partition);
+    }
+    DMOD_LOG_INFO("Partition available: %s\n", partition->path);
+}
+
+/**
+ * @brief Expose the partitions of a block node as nodes of their own
+ *
+ * Called once the node's absolute path is known (the same places as
+ * notify_driver_path_ready()). "/dmsdio0/0" with an MBR or GPT gets
+ * "/dmsdio0/0p1", "/dmsdio0/0p2", ... next to it; a medium without a table
+ * (superfloppy, blank) gets none. Partition nodes are reported to libsystemd
+ * as "block" and withdrawn together with their parent
+ * (remove_partitions_of()).
+ *
+ * Must be called without g_devfs_mutex held (driver code).
+ */
+static void scan_partitions( dmfsi_context_t mount, const char* mount_path, driver_node_t* node )
+{
+    if (node == NULL || node->is_builtin || node->is_partition)
+    {
+        return;
+    }
+    dmlist_context_t* found = find_partitions(node);
+    if (found == NULL)
+    {
+        return;
+    }
+    driver_node_t* partition;
+    while ((partition = (driver_node_t*)dmlist_pop_front(found)) != NULL)
+    {
+        publish_partition(mount, mount_path, partition);
+    }
+    dmlist_destroy(found);
+}
+
+/**
+ * @brief dmlist compare function matching the partition nodes of one device
+ */
+static int compare_partition_of( const void* data, const void* user_data )
+{
+    const driver_node_t* node = (const driver_node_t*)data;
+    const dynamic_device_lookup_t* lookup = (const dynamic_device_lookup_t*)user_data;
+    if (node == NULL || lookup == NULL || !node->is_partition || node->driver_context != lookup->context)
+    {
+        return -1;
+    }
+    return dev_num_equal(&node->dev_num, lookup->dev_num) ? 0 : -1;
+}
+
+/**
+ * @brief Withdraw every partition node of a device that went away
+ *
+ * Same life cycle as the device node itself (see process_device_unavailable()):
+ * unpublished under the lock, reported removed without it, freed once the last
+ * open handle is closed. Must be called without g_devfs_mutex held.
+ */
+static void remove_partitions_of( dmfsi_context_t mount, const dynamic_device_lookup_t* lookup )
+{
+    for (;;)
+    {
+        dmosi_mutex_lock(g_devfs_mutex);
+        bool live = dmlist_find(g_dmdevfs_mounts, mount, compare_mount_context) != NULL;
+        driver_node_t* partition = live ? (driver_node_t*)dmlist_find(mount->drivers, lookup, compare_partition_of) : NULL;
+        if (partition != NULL)
+        {
+            dmlist_remove(mount->drivers, partition, compare_driver);
+            partition->removed = true;
+            partition->open_count++;    // Keep it alive across the unlocked report below.
+        }
+        dmosi_mutex_unlock(g_devfs_mutex);
+
+        if (partition == NULL)
+        {
+            return;
+        }
+        report_node_removed(partition);
+        DMOD_LOG_INFO("Partition no longer available: %s\n", partition->path);
+        release_driver_node_ref(partition);
+    }
+}
+
 /**
  * @brief dmlist_foreach() callback pushing the path to every already-registered driver
  */
@@ -3017,7 +3341,7 @@ static bool notify_friend_recipient( void* data, void* user_data )
     const friend_notification_t* notification = (const friend_notification_t*)user_data;
     driver_node_t* source = notification->source;
 
-    if (recipient == NULL || recipient->is_builtin || recipient->is_dynamic ||
+    if (recipient == NULL || recipient->is_builtin || recipient->is_dynamic || recipient->is_partition ||
         recipient->driver_context == source->driver_context ||
         recipient->friends_group == NULL ||
         strcmp(recipient->friends_group, source->friends_group) != 0)
@@ -3104,6 +3428,10 @@ static void free_driver_node( driver_node_t* node )
     {
         Dmod_Free(node->friends_group);
     }
+    if (node->parent_path != NULL)
+    {
+        Dmod_Free(node->parent_path);
+    }
     Dmod_Free(node);
 }
 
@@ -3137,6 +3465,15 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, void, _mounted, (dmfsi_context_t c
     // mutated here, only iterated - concurrent hot-plug insertions are
     // handled by process_device_available() directly.
     dmlist_foreach(ctx->drivers, notify_all_drivers_path_ready, ctx->mount_path);
+
+    // Partitions of the block devices configured so far. Bounded by the
+    // count taken first: scan_partitions() appends the partition nodes it
+    // creates, which must not be scanned themselves.
+    size_t configured = dmlist_size(ctx->drivers);
+    for (size_t i = 0; i < configured; i++)
+    {
+        scan_partitions(ctx, ctx->mount_path, (driver_node_t*)dmlist_get(ctx->drivers, i));
+    }
 
     // All absolute paths are known now. Broadcast each group member only
     // after the path_ready pass, so recipients always receive complete info.
@@ -3260,6 +3597,10 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     new_node->was_enabled = false;
     new_node->is_dynamic = true;
     new_node->is_builtin = false;
+    new_node->is_partition = false;
+    new_node->part_offset = 0;
+    new_node->part_length = 0;
+    new_node->parent_path = NULL;
     new_node->friends_group = owner_group;
     new_node->friend_role = owner_role;
     new_node->report_mask = owner_report_mask;
@@ -3308,6 +3649,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     {
         notify_driver_path_ready(mount_path, new_node);
         notify_friends_about_node(mount, new_node, dmdrvi_dev_state_ready);
+        scan_partitions(mount, mount_path, new_node);
     }
 
     DMOD_LOG_INFO("Hot-plugged device now available: %s\n", new_node->path);
@@ -3349,6 +3691,10 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
     node->open_count++; // Keep metadata alive across the unlocked callbacks below.
 
     dmosi_mutex_unlock(g_devfs_mutex);
+
+    // Its partitions go first: whatever was started for them (automount)
+    // stops before the services of the whole device.
+    remove_partitions_of(mount, &lookup);
 
     // The node has already been unpublished, so callbacks cannot reopen it.
     // Its metadata remains valid until all callbacks (and any open handles)
