@@ -10,9 +10,11 @@
  * Test driver for the libsystemd node reporting of dmdevfs.
  *
  * Configuration keys: `major` (device number) and `monitor` ("true": the host
- * node answers DMDRVI_IOCTL_MONITOR_GET_POLICY). The hot-plugged child
- * (minor 0) always answers DMDRVI_IOCTL_BLOCK_GET_INFO. Everything else a
- * dmdrvi driver has to provide is a minimal no-op.
+ * node implements the monitor contract). Its policy comes from
+ * `event_handler`, `settle_ms` and `poll_interval_ms`; MONITOR_EVENT and
+ * MONITOR_REFRESH calls are only counted (DMDEVFS_MOCKDRV_IOCTL_GET_STATS).
+ * The hot-plugged child (minor 0) always answers DMDRVI_IOCTL_BLOCK_GET_INFO.
+ * Everything else a dmdrvi driver has to provide is a minimal no-op.
  */
 
 #define MOCKDRV_CONTEXT_MAGIC   0x4D4F434Bu     /* 'MOCK' */
@@ -24,6 +26,9 @@ struct dmdrvi_context
     uint8_t     major;
     bool        monitor;
     bool        plugged;
+    dmdrvi_monitor_policy_t     policy;
+    volatile uint32_t           events;     /* MONITOR_EVENT calls */
+    volatile uint32_t           refreshes;  /* MONITOR_REFRESH calls */
 };
 
 typedef struct
@@ -72,6 +77,13 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, dmdrvi_context_t, _create,
     ctx->major   = (uint8_t)dmini_get_int(config, NULL, "major", 0);
     ctx->monitor = (strcmp(monitor, "true") == 0);
     ctx->plugged = false;
+    ctx->events = 0;
+    ctx->refreshes = 0;
+    memset(&ctx->policy, 0, sizeof(ctx->policy));
+    Dmod_SnPrintf(ctx->policy.event_handler, sizeof(ctx->policy.event_handler), "%s",
+                  dmini_get_string(config, NULL, "event_handler", ""));
+    ctx->policy.settle_ms = (uint32_t)dmini_get_int(config, NULL, "settle_ms", 0);
+    ctx->policy.poll_interval_ms = (uint32_t)dmini_get_int(config, NULL, "poll_interval_ms", 0);
 
     memset(dev_num, 0, sizeof(*dev_num));
     dev_num->flags = DMDRVI_NUM_MAJOR;
@@ -149,17 +161,41 @@ static int set_plugged(dmdrvi_context_t context, bool plugged)
     return 0;
 }
 
+static int monitor_ioctl(dmdrvi_context_t context, int command, void* arg)
+{
+    if (!context->monitor)
+    {
+        return -ENOTTY;
+    }
+    switch (command)
+    {
+        case DMDRVI_IOCTL_MONITOR_GET_POLICY:
+            *(dmdrvi_monitor_policy_t*)arg = context->policy;
+            return 0;
+        case DMDRVI_IOCTL_MONITOR_EVENT:
+            context->events++;
+            return 0;
+        default:
+            context->refreshes++;
+            return context->plugged ? 0 : -ENODEV;
+    }
+}
+
 static int host_ioctl(dmdrvi_context_t context, int command, void* arg)
 {
     switch (command)
     {
         case DMDRVI_IOCTL_MONITOR_GET_POLICY:
-            if (!context->monitor)
-            {
-                return -ENOTTY;
-            }
-            memset(arg, 0, sizeof(dmdrvi_monitor_policy_t));
+        case DMDRVI_IOCTL_MONITOR_EVENT:
+        case DMDRVI_IOCTL_MONITOR_REFRESH:
+            return monitor_ioctl(context, command, arg);
+        case DMDEVFS_MOCKDRV_IOCTL_GET_STATS:
+        {
+            dmdevfs_mockdrv_stats_t* stats = (dmdevfs_mockdrv_stats_t*)arg;
+            stats->events = context->events;
+            stats->refreshes = context->refreshes;
             return 0;
+        }
         case DMDEVFS_MOCKDRV_IOCTL_PLUG:
             return set_plugged(context, true);
         case DMDEVFS_MOCKDRV_IOCTL_UNPLUG:

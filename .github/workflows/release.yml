@@ -119,12 +119,24 @@ jobs:
           cd ..
           echo "Created archive:"
           ls -lh dmdevfs-*.zip
+
+      - name: Create dmdevmon archive
+        run: |
+          set -e
+          # dmdevmon (services/dmdevmon) is packaged by the build itself from
+          # its dmdevmon.dmr: module, docs and the libsystemd rule/unit.
+          PKG_DIR=build_$ARCH_DIR_NAME/packages/dmdevmon
+          test -d "$PKG_DIR"
+          (cd "$PKG_DIR" && zip -r "${OLDPWD}/dmdevmon-${{ github.event.release.tag_name || github.ref_name }}-$ARCH_DIR_NAME.zip" .)
+          ls -lh dmdevmon-*.zip
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: dmdevfs-${{ github.event.release.tag_name || github.ref_name }}-*.zip
+          path: |
+            dmdevfs-${{ github.event.release.tag_name || github.ref_name }}-*.zip
+            dmdevmon-${{ github.event.release.tag_name || github.ref_name }}-*.zip
           retention-days: 1
 
   generate-versions-manifest:
@@ -163,6 +175,20 @@ jobs:
           
           # Add $version-available directive for dmdevfs module
           echo "\$version-available dmdevfs $VERSIONS" >> versions.dmm
+
+          # dmdevmon only exists from the release that added services/dmdevmon
+          DMDEVMON_VERSIONS=""
+          for VERSION in $VERSIONS; do
+            if git cat-file -e "v$VERSION:services/dmdevmon/CMakeLists.txt" 2>/dev/null; then
+              DMDEVMON_VERSIONS="$DMDEVMON_VERSIONS $VERSION"
+            fi
+          done
+          CURRENT="${{ github.event.release.tag_name || github.ref_name }}"
+          CURRENT="${CURRENT#v}"
+          if ! echo " $DMDEVMON_VERSIONS " | grep -q " $CURRENT "; then
+            DMDEVMON_VERSIONS="$DMDEVMON_VERSIONS $CURRENT"
+          fi
+          echo "\$version-available dmdevmon $(echo $DMDEVMON_VERSIONS | xargs)" >> versions.dmm
           
           echo "Generated versions.dmm:"
           cat versions.dmm

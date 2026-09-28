@@ -1,0 +1,11 @@
+; dmdevmon.rules - libsystemd device rule.
+;
+; dmdevfs reports every node whose driver answers
+; DMDRVI_IOCTL_MONITOR_GET_POLICY under class "monitor", named after the node
+; path ("/dmsdio0" -> "dmsdio0"), with the node's absolute path as the user
+; value. Start one dmdevmon@<name> instance for each, instantiated on demand
+; from dmdevmon@.ini; the removal of the node stops it again.
+;
+; Load with libsystemd_load_rules() on the directory this file lives in.
+[class=monitor]
+start=dmdevmon@%name

@@ -51,42 +51,68 @@ add_test(NAME dmdevfs_source_compiled
 add_subdirectory(mockdrv)
 add_subdirectory(testsvc)
 
-set(DMOD_MODULE_NAME        test_dmdevfs)
+# Registers a test module with ctest - replays what CI does: install its
+# dependencies, then run it through dmod_loader.
+find_program(DMF_GET_EXECUTABLE dmf-get HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
+find_program(DMOD_LOADER_EXECUTABLE dmod_loader HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
+function(dmdevfs_register_test name)
+    if(DMF_GET_EXECUTABLE AND DMOD_LOADER_EXECUTABLE)
+        add_test(
+            NAME ${name}
+            COMMAND ${CMAKE_COMMAND} -E env DMOD_DMF_DIR=${DMOD_DMF_DIR}
+                bash -c "${DMF_GET_EXECUTABLE} install -d ${DMOD_DMF_DIR}/${name}.dmd -y && ${DMOD_LOADER_EXECUTABLE} ${DMOD_DMF_DIR}/${name}.dmf"
+        )
+    else()
+        message(WARNING "dmf-get/dmod_loader not found - 'ctest' will not run ${name}")
+    endif()
+endfunction()
+
 set(DMOD_MODULE_VERSION     ${PROJECT_VERSION})
 set(DMOD_AUTHOR_NAME        "Patryk Kubiak")
 set(DMOD_STACK_SIZE         2048)
 set(DMOD_PRIORITY           0)
 
+# test_dmdevfs - libsystemd node reporting
+set(DMOD_MODULE_NAME        test_dmdevfs)
 dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     test_dmdevfs.c
 )
-
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv
 )
-
 target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
     DMDEVFS_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
-
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
     dmosi
     libsystemd
 )
+dmdevfs_register_test(${DMOD_MODULE_NAME})
 
-# Replays what CI does: install the test's dependencies, then run it.
-find_program(DMF_GET_EXECUTABLE dmf-get HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
-find_program(DMOD_LOADER_EXECUTABLE dmod_loader HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
-if(DMF_GET_EXECUTABLE AND DMOD_LOADER_EXECUTABLE)
-    add_test(
-        NAME ${DMOD_MODULE_NAME}
-        COMMAND ${CMAKE_COMMAND} -E env DMOD_DMF_DIR=${DMOD_DMF_DIR}
-            bash -c "${DMF_GET_EXECUTABLE} install -d ${DMOD_DMF_DIR}/${DMOD_MODULE_NAME}.dmd -y && ${DMOD_LOADER_EXECUTABLE} ${DMOD_DMF_DIR}/${DMOD_MODULE_NAME}.dmf"
-    )
-else()
-    message(WARNING "dmf-get/dmod_loader not found - 'ctest' will not run ${DMOD_MODULE_NAME}")
-endif()
+# test_dmdevmon - the dmdevmon monitor loop. Compiles the loop's source
+# (the unit under test) into the test; the service's main.c, which only
+# adds the file API and libsystemd around it, cannot run on the host loader
+# (no dmvfs there).
+set(DMOD_MODULE_NAME        test_dmdevmon)
+dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
+    test_dmdevmon.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../services/dmdevmon/src/dmdevmon.c
+)
+target_include_directories(${DMOD_MODULE_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv
+    ${CMAKE_CURRENT_SOURCE_DIR}/../services/dmdevmon/src
+)
+target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
+    DMDEVFS_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmfsi
+    dmdrvi@>=2.1
+    dmhaman
+    dmosi
+)
+dmdevfs_register_test(${DMOD_MODULE_NAME})
 
 # Print information about tests
 message(STATUS "DMDEVFS tests configured")

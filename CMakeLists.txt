@@ -99,6 +99,13 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
 )
 
 # ======================================================================
+#               Services
+# ======================================================================
+# dmdevmon - generic monitor service for nodes implementing the dmdrvi
+# monitor contract (reported to libsystemd as class "monitor", see above).
+add_subdirectory(services/dmdevmon)
+
+# ======================================================================
 #               Tests
 # ======================================================================
 option(DMDEVFS_BUILD_TESTS "Build tests" OFF)

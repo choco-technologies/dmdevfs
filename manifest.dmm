@@ -3,3 +3,7 @@ $include https://github.com/choco-technologies/dmdfs/releases/download/vlatest/v
 
 # Module entries with version placeholder - will be expanded by $version-available
 dmdevfs https://github.com/choco-technologies/dmdfs/releases/download/v<version>/dmdevfs-v<version>-<arch_name>.zip
+
+# dmdevmon - monitor service Application (services/dmdevmon), built and
+# released together with dmdevfs
+dmdevmon https://github.com/choco-technologies/dmdfs/releases/download/v<version>/dmdevmon-v<version>-<arch_name>.zip
