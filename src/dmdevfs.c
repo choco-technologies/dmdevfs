@@ -17,7 +17,7 @@
 #include "dmdrvi.h"
 #include "dmosi.h"
 #include "libsystemd.h"
-#include "partitions.h"
+#include "dmpart.h"
 #include <errno.h>
 #include <string.h>
 
@@ -3125,7 +3125,7 @@ typedef struct
 } partition_scan_t;
 
 /**
- * @brief dmdevfs_part_read_t through the parent's driver
+ * @brief dmpart_read_t through the parent's driver
  */
 static int partition_read( void* ctx, uint64_t offset, void* buffer, size_t size )
 {
@@ -3164,7 +3164,7 @@ static driver_node_t* create_partition_node( const driver_node_t* parent, uint32
 }
 
 /**
- * @brief dmdevfs_part_found_t collecting partition nodes
+ * @brief dmpart_found_t collecting partition nodes
  */
 static bool on_partition_found( void* ctx, uint32_t number, uint64_t first_lba, uint64_t lba_count )
 {
@@ -3208,8 +3208,12 @@ static dmlist_context_t* find_partitions( driver_node_t* node )
         (found = dmlist_create()) != NULL)
     {
         partition_scan_t scan = { node, dmdrvi_read, handle, info.logical_block_size, found };
-        dmdevfs_partitions_scan(partition_read, &scan, info.logical_block_size, info.block_count,
-                                on_partition_found, &scan);
+        dmpart_medium_t medium = { partition_read, &scan, info.logical_block_size, info.block_count };
+        dmpart_info_t table;
+        if (dmpart_scan(&medium, on_partition_found, &scan, &table) == -ENOMEM)
+        {
+            DMOD_LOG_ERROR("Out of memory reading the partition table of %s\n", node->path);
+        }
     }
     dmdrvi_close(node->driver_context, handle);
     return found;

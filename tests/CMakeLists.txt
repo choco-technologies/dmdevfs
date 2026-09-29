@@ -61,13 +61,17 @@ add_subdirectory(testsvc)
 # /__w/dmdevfs/dmdevfs/...).
 find_program(DMF_GET_EXECUTABLE dmf-get HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
 find_program(DMOD_LOADER_EXECUTABLE dmod_loader HINTS ${DMOD_TOOLS_BIN_DIR} PATHS ENV PATH)
+#
+# dmdevfs itself is not a dependency of the test modules (they mount it by
+# name), so its own dependencies - e.g. dmpart - are installed from
+# dmdevfs.dmd first; the test module's own ones from <name>.dmd.
 function(dmdevfs_register_test name)
     if(DMF_GET_EXECUTABLE AND DMOD_LOADER_EXECUTABLE)
         add_test(
             NAME ${name}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             COMMAND ${CMAKE_COMMAND} -E env DMOD_DMF_DIR=${DMOD_DMF_DIR}
-                bash -c "${DMF_GET_EXECUTABLE} install -d ${DMOD_DMF_DIR}/${name}.dmd -y && ${DMOD_LOADER_EXECUTABLE} ${DMOD_DMF_DIR}/${name}.dmf"
+                bash -c "${DMF_GET_EXECUTABLE} install -d ${DMOD_DMF_DIR}/dmdevfs.dmd -y && ${DMF_GET_EXECUTABLE} install -d ${DMOD_DMF_DIR}/${name}.dmd -y && ${DMOD_LOADER_EXECUTABLE} ${DMOD_DMF_DIR}/${name}.dmf"
         )
         # A hang must fail the run (with its output), not stall CI.
         set_tests_properties(${name} PROPERTIES TIMEOUT 180)
