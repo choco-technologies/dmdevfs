@@ -250,8 +250,13 @@ partition table and creates one node per partition next to it:
 
 | Table | Detected by | Numbers |
 |-------|-------------|---------|
-| MBR | `0x55AA` signature, valid status bytes, entries inside the medium; a FAT boot sector (superfloppy) is *not* taken for an MBR | primaries `1`-`4` by slot (empty slots leave gaps), logical partitions of an extended partition (`0x05`, `0x0F`, `0x85`) from `5` in chain order |
+| MBR | `0x55AA` signature, valid status bytes, entries inside the medium; a FAT or exFAT boot sector (superfloppy) is *not* taken for an MBR | primaries `1`-`4` by slot (empty slots leave gaps), logical partitions of an extended partition (`0x05`, `0x0F`, `0x85`) from `5` in chain order |
 | GPT | protective MBR (`0xEE`), then the `EFI PART` header at LBA 1 with valid header and entry array CRC32; if the primary header is damaged, the backup at the last LBA | entry index + 1 |
+
+The table is parsed by [dmpart](https://github.com/choco-technologies/dmblkid/tree/main/libs/dmpart)
+(released with dmblkid) - the same parser dmblkid uses, so a medium that
+gets partition nodes here is always reported by dmblkid as a partition
+table, never as a filesystem to mount whole.
 
 A medium without a valid table (blank, superfloppy, damaged GPT with both
 headers corrupted) gets no partition nodes - the whole-medium node is the
@@ -581,8 +586,7 @@ dmdevfs/
 ├── include/
 │   └── dmdevfs.h            # Public header
 ├── src/
-│   ├── dmdevfs.c            # Main DMDEVFS implementation
-│   └── partitions.c/.h      # MBR/GPT partition table parser
+│   └── dmdevfs.c            # Main DMDEVFS implementation
 ├── services/
 │   └── dmdevmon/            # generic monitor service (rules + unit in configs/)
 ├── tests/
