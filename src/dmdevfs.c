@@ -908,7 +908,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _eof, (dmfsi_context_t ctx, v
  * @brief Get file size
  * @note Device drivers represent devices, not files with fixed sizes. Use stat for size info.
  */
-dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, dmfsi_size_t, _size, (dmfsi_context_t ctx, void* fp) )
+dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_size_t, _size, (dmfsi_context_t ctx, void* fp) )
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
@@ -1117,7 +1117,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
 /**
  * @brief Read directory entry
  */
-dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _readdir, (dmfsi_context_t ctx, void* dp, dmfsi_dir_entry_t* entry) )
+dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, int, _readdir, (dmfsi_context_t ctx, void* dp, dmfsi_dir_entry_t* entry) )
 {
     if(dmfsi_dmdevfs_context_is_valid(ctx) == 0)
     {
