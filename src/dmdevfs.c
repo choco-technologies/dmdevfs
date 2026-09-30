@@ -3254,15 +3254,26 @@ static void publish_partition( dmfsi_context_t mount, const char* mount_path, dr
  * as "block" and withdrawn together with their parent
  * (remove_partitions_of()).
  *
+ * Always runs after notify_driver_path_ready(), whose report_node_added()
+ * has already probed the node: only a node reported as "block" is opened
+ * again to read its table. Every other node (tty, gpio, dma, ...) is left
+ * alone - a second open of each would be wasted, and fails loudly for
+ * drivers that open exclusively (e.g. a dmdma stream leased by another
+ * driver, or telnetd, which hangs up a connection when its node is
+ * closed). A node whose report= excludes "block" gets no partition nodes.
+ *
  * Must be called without g_devfs_mutex held (driver code).
  */
 static void scan_partitions( dmfsi_context_t mount, const char* mount_path, driver_node_t* node )
 {
-    // Only nodes that may be block devices (report= mask) - probing opens and
-    // closes the node, which for some drivers is not free of side effects
-    // (telnetd hangs up the connection when its node is closed)
-    if (node == NULL || node->is_builtin || node->is_partition ||
-        (node->report_mask & DMDEVFS_REPORT_BLOCK) == 0)
+    if (node == NULL || node->is_builtin || node->is_partition)
+    {
+        return;
+    }
+    dmosi_mutex_lock(g_devfs_mutex);
+    bool is_block = (node->reported & DMDEVFS_REPORT_BLOCK) != 0;
+    dmosi_mutex_unlock(g_devfs_mutex);
+    if (!is_block)
     {
         return;
     }
