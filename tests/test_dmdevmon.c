@@ -118,7 +118,7 @@ static dmdevmon_t* create(const char* node, int* error)
 
 static dmdevfs_mockdrv_stats_t stats(const char* node)
 {
-    dmdevfs_mockdrv_stats_t s = { 0, 0 };
+    dmdevfs_mockdrv_stats_t s = { 0 };
     node_ioctl((void*)node, DMDEVFS_MOCKDRV_IOCTL_GET_STATS, &s);
     return s;
 }

@@ -18,7 +18,9 @@
  * DMDEVFS_MOCKDRV_BLOCK_SIZE blocks (default 8, DMDEVFS_MOCKDRV_IOCTL_SET_MEDIA):
  * only sectors ever written are stored, so 64-bit sized media cost nothing.
  * The medium can be prepared through the host node while the child is not
- * plugged (DMDEVFS_MOCKDRV_IOCTL_WRITE_SECTOR). Everything else a dmdrvi driver
+ * plugged (DMDEVFS_MOCKDRV_IOCTL_WRITE_SECTOR). Each context remembers when it
+ * was created relative to the others (create_seq in the stats), so the order
+ * dmdevfs configures drivers in is observable. Everything else a dmdrvi driver
  * has to provide is a minimal no-op.
  */
 
@@ -34,6 +36,7 @@ struct dmdrvi_context
     dmdrvi_monitor_policy_t     policy;
     volatile uint32_t           events;     /* MONITOR_EVENT calls */
     volatile uint32_t           refreshes;  /* MONITOR_REFRESH calls */
+    uint32_t                    create_seq; /* Value of g_create_count after this _create */
     uint64_t                    block_count;/* Medium size of the child */
     dmlist_context_t*           sectors;    /* dmdevfs_mockdrv_sector_t* written so far */
 };
@@ -43,6 +46,9 @@ typedef struct
     uint32_t    magic;
     bool        is_child;
 } mockdrv_handle_t;
+
+/* Contexts created so far - only ever grows, so create_seq orders them. */
+static uint32_t g_create_count;
 
 int dmod_init(const Dmod_Config_t* Config)
 {
@@ -203,6 +209,7 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, dmdrvi_context_t, _create,
     ctx->plugged = false;
     ctx->events = 0;
     ctx->refreshes = 0;
+    ctx->create_seq = ++g_create_count;
     ctx->block_count = 8;
     ctx->sectors = dmlist_create();
     memset(&ctx->policy, 0, sizeof(ctx->policy));
@@ -350,6 +357,7 @@ static int host_ioctl(dmdrvi_context_t context, int command, void* arg)
             dmdevfs_mockdrv_stats_t* stats = (dmdevfs_mockdrv_stats_t*)arg;
             stats->events = context->events;
             stats->refreshes = context->refreshes;
+            stats->create_seq = context->create_seq;
             return 0;
         }
         case DMDEVFS_MOCKDRV_IOCTL_PLUG:

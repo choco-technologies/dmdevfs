@@ -22,6 +22,7 @@ typedef struct
 {
     uint32_t    events;     /**< DMDRVI_IOCTL_MONITOR_EVENT */
     uint32_t    refreshes;  /**< DMDRVI_IOCTL_MONITOR_REFRESH */
+    uint32_t    create_seq; /**< 1-based order in which dmdevfs created this context */
 } dmdevfs_mockdrv_stats_t;
 
 /** One raw sector for DMDEVFS_MOCKDRV_IOCTL_WRITE_SECTOR. */
