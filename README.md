@@ -227,7 +227,10 @@ libsystemd remembers the device and starts the units once rules are loaded.
 Drivers therefore never report their nodes to libsystemd themselves.
 
 Use `report=` in a device's configuration to limit or disable this, e.g. for
-raw flash that must never be automounted:
+raw flash that must never be automounted. Finding out a node's classes means
+opening and closing it, so `report=none` is also how a driver whose node must
+not be opened by anyone but its user (telnetd hangs up a connection when its
+node is closed) keeps DMDEVFS from probing it:
 
 ```ini
 [internal_flash]
@@ -237,8 +240,8 @@ report=none
 
 ### Partition Nodes
 
-Whenever a node that answers `DMDRVI_IOCTL_BLOCK_GET_INFO` becomes
-available - at mount, when a pending configuration becomes ready, or when a
+Whenever a node that answers `DMDRVI_IOCTL_BLOCK_GET_INFO` (and whose
+`report=` allows `block`) becomes available - at mount, when a pending configuration becomes ready, or when a
 driver announces it with `dmdrvi_device_available()` - DMDEVFS reads its
 partition table and creates one node per partition next to it:
 

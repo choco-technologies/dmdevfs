@@ -3258,7 +3258,11 @@ static void publish_partition( dmfsi_context_t mount, const char* mount_path, dr
  */
 static void scan_partitions( dmfsi_context_t mount, const char* mount_path, driver_node_t* node )
 {
-    if (node == NULL || node->is_builtin || node->is_partition)
+    // Only nodes that may be block devices (report= mask) - probing opens and
+    // closes the node, which for some drivers is not free of side effects
+    // (telnetd hangs up the connection when its node is closed)
+    if (node == NULL || node->is_builtin || node->is_partition ||
+        (node->report_mask & DMDEVFS_REPORT_BLOCK) == 0)
     {
         return;
     }
