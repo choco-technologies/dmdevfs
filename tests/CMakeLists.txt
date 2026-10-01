@@ -148,6 +148,26 @@ dmod_link_modules(${DMOD_MODULE_NAME}
 )
 dmdevfs_register_test(${DMOD_MODULE_NAME})
 
+# test_order - configuration order by driver_order (negative, default, positive)
+set(DMOD_MODULE_NAME        test_order)
+dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
+    test_order.c
+)
+target_include_directories(${DMOD_MODULE_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv
+)
+target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
+    DMDEVFS_TEST_FIXTURES_DIR="fixtures"
+)
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmfsi
+    dmdrvi@>=2.1
+    dmhaman
+    dmosi
+    libsystemd
+)
+dmdevfs_register_test(${DMOD_MODULE_NAME})
+
 # Print information about tests
 message(STATUS "DMDEVFS tests configured")
 message(STATUS "  Module output directory: ${CMAKE_BINARY_DIR}/dmf")
