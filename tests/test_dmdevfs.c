@@ -143,6 +143,19 @@ static int set_plugged(const char* host, bool plugged)
     return ret;
 }
 
+/** Driver statistics of /dev/dmdevfs_mockdrv<major>, fetched through dmdevfs (one host open). */
+static int get_stats(const char* host, dmdevfs_mockdrv_stats_t* stats)
+{
+    void* file = NULL;
+    if (g_fs.fopen(g_mount, &file, host, DMFSI_O_RDONLY, 0) != DMFSI_OK)
+    {
+        return -ENOENT;
+    }
+    int ret = g_fs.ioctl(g_mount, file, DMDEVFS_MOCKDRV_IOCTL_GET_STATS, stats);
+    g_fs.fclose(g_mount, file);
+    return ret;
+}
+
 DMOD_TEST_STEP(dmdevfs_reports_monitored_node_and_its_removal)
 {
     DMOD_TEST_EXPECT_NOT_NULL(g_mount);
@@ -180,6 +193,27 @@ DMOD_TEST_STEP(dmdevfs_hot_plugged_node_inherits_report_setting)
     DMOD_TEST_EXPECT_EQ(set_plugged("/dmdevfs_mockdrv2", true), 0);  /* default: all */
     DMOD_TEST_EXPECT_TRUE(wait_ready("blk@dmdevfs_mockdrv2_0", "/dev/dmdevfs_mockdrv2/0"));
     DMOD_TEST_EXPECT_EQ(unit_state("blk@dmdevfs_mockdrv1_0"), -1);
+}
+
+DMOD_TEST_STEP(dmdevfs_opens_only_block_nodes_to_scan_partitions)
+{
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+    DMOD_TEST_EXPECT_EQ(set_plugged("/dmdevfs_mockdrv1", true), 0);  /* report=none */
+    DMOD_TEST_EXPECT_EQ(set_plugged("/dmdevfs_mockdrv2", true), 0);  /* default: all */
+    /* One hot-plug thread, in order: mock1's child has been handled once
+     * mock2's is reported. */
+    DMOD_TEST_EXPECT_TRUE(wait_ready("blk@dmdevfs_mockdrv2_0", "/dev/dmdevfs_mockdrv2/0"));
+
+    dmdevfs_mockdrv_stats_t stats;
+    /* Plain host node: probed once at mount, never opened again for its
+     * partition table since it is no block device - plus get_stats() and
+     * set_plugged() themselves. */
+    DMOD_TEST_EXPECT_EQ(get_stats("/dmdevfs_mockdrv2", &stats), 0);
+    DMOD_TEST_EXPECT_EQ(stats.host_opens, 3u);
+    /* report=none: neither the host nor its block child are opened by dmdevfs. */
+    DMOD_TEST_EXPECT_EQ(get_stats("/dmdevfs_mockdrv1", &stats), 0);
+    DMOD_TEST_EXPECT_EQ(stats.host_opens, 2u);
+    DMOD_TEST_EXPECT_EQ(stats.child_opens, 0u);
 }
 
 DMOD_TEST_STEP(dmdevfs_reports_removal_of_plugged_node_on_teardown)

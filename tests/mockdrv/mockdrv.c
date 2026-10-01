@@ -13,7 +13,8 @@
  * Configuration keys: `major` (device number) and `monitor` ("true": the host
  * node implements the monitor contract). Its policy comes from
  * `event_handler`, `settle_ms` and `poll_interval_ms`; MONITOR_EVENT and
- * MONITOR_REFRESH calls are only counted (DMDEVFS_MOCKDRV_IOCTL_GET_STATS).
+ * MONITOR_REFRESH calls are only counted (DMDEVFS_MOCKDRV_IOCTL_GET_STATS),
+ * as are the opens of the host node and of its child.
  * The hot-plugged child (minor 0) is a block device on a sparse medium of
  * DMDEVFS_MOCKDRV_BLOCK_SIZE blocks (default 8, DMDEVFS_MOCKDRV_IOCTL_SET_MEDIA):
  * only sectors ever written are stored, so 64-bit sized media cost nothing.
@@ -37,6 +38,8 @@ struct dmdrvi_context
     volatile uint32_t           events;     /* MONITOR_EVENT calls */
     volatile uint32_t           refreshes;  /* MONITOR_REFRESH calls */
     uint32_t                    create_seq; /* Value of g_create_count after this _create */
+    volatile uint32_t           host_opens; /* Successful _open() of the host node */
+    volatile uint32_t           child_opens;/* Successful _open() of the child */
     uint64_t                    block_count;/* Medium size of the child */
     dmlist_context_t*           sectors;    /* dmdevfs_mockdrv_sector_t* written so far */
 };
@@ -210,6 +213,8 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, dmdrvi_context_t, _create,
     ctx->events = 0;
     ctx->refreshes = 0;
     ctx->create_seq = ++g_create_count;
+    ctx->host_opens = 0;
+    ctx->child_opens = 0;
     ctx->block_count = 8;
     ctx->sectors = dmlist_create();
     memset(&ctx->policy, 0, sizeof(ctx->policy));
@@ -249,6 +254,14 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, void*, _open,
     {
         handle->magic = MOCKDRV_HANDLE_MAGIC;
         handle->is_child = is_child;
+        if (is_child)
+        {
+            context->child_opens++;
+        }
+        else
+        {
+            context->host_opens++;
+        }
     }
     return handle;
 }
@@ -358,6 +371,8 @@ static int host_ioctl(dmdrvi_context_t context, int command, void* arg)
             stats->events = context->events;
             stats->refreshes = context->refreshes;
             stats->create_seq = context->create_seq;
+            stats->host_opens = context->host_opens;
+            stats->child_opens = context->child_opens;
             return 0;
         }
         case DMDEVFS_MOCKDRV_IOCTL_PLUG:

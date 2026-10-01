@@ -17,12 +17,14 @@
 
 #include <stdint.h>
 
-/** Monitor contract calls a monitored host node received so far. */
+/** Monitor contract calls a monitored host node received so far, and opens of its nodes. */
 typedef struct
 {
-    uint32_t    events;     /**< DMDRVI_IOCTL_MONITOR_EVENT */
-    uint32_t    refreshes;  /**< DMDRVI_IOCTL_MONITOR_REFRESH */
-    uint32_t    create_seq; /**< 1-based order in which dmdevfs created this context */
+    uint32_t    events;         /**< DMDRVI_IOCTL_MONITOR_EVENT */
+    uint32_t    refreshes;      /**< DMDRVI_IOCTL_MONITOR_REFRESH */
+    uint32_t    create_seq;     /**< 1-based order in which dmdevfs created this context */
+    uint32_t    host_opens;     /**< Successful opens of the host node, including the GET_STATS caller's own */
+    uint32_t    child_opens;    /**< Successful opens of the block child */
 } dmdevfs_mockdrv_stats_t;
 
 /** One raw sector for DMDEVFS_MOCKDRV_IOCTL_WRITE_SECTOR. */

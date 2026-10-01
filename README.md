@@ -240,10 +240,13 @@ report=none
 
 ### Partition Nodes
 
-Whenever a node that answers `DMDRVI_IOCTL_BLOCK_GET_INFO` (and whose
-`report=` allows `block`) becomes available - at mount, when a pending configuration becomes ready, or when a
+Whenever a node that answers `DMDRVI_IOCTL_BLOCK_GET_INFO` becomes
+available - at mount, when a pending configuration becomes ready, or when a
 driver announces it with `dmdrvi_device_available()` - DMDEVFS reads its
-partition table and creates one node per partition next to it:
+partition table and creates one node per partition next to it. Only nodes
+already reported as `block` (see above) are read, so a node whose
+`report=` excludes `block` gets no partition nodes, and no other node is
+opened for it:
 
 ```
 /dev/dmsdio0/0      whole medium
