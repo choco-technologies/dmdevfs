@@ -184,17 +184,25 @@ typedef struct
 } hotplug_event_t;
 
 /**
- * @brief Reference-counted wrapper around one discovered config file's parsed
- *        INI context. A single file can yield several pending_driver_t entries
- *        (one per [section] declaring its own driver_name), so the underlying
- *        dmini_context_t can only be freed once none of them need it anymore -
- *        this tracks that, so it can happen as each entry finishes instead of
- *        only at the very end of the whole /configs walk.
+ * @brief One discovered config file, shared by the pending_driver_t entries
+ *        queued from it (one per [section] declaring its own driver_name).
+ *
+ * The file is parsed while the config tree is walked only to queue its
+ * drivers, then the parsed INI is released again and only the path is kept.
+ * It is parsed once more when the first of its drivers is created, and stays
+ * parsed while the following drivers come from the same file; it is released
+ * as soon as a driver from another file is configured or its last driver is
+ * done (see acquire_config_file()) - at most one file is parsed at a time.
+ * A parsed INI costs several times the size of the file in small heap
+ * blocks, and the walk happens before any driver - e.g. external RAM - is
+ * configured: keeping every file parsed until its driver's turn filled and
+ * fragmented the main heap at the worst possible time.
  */
 typedef struct
 {
-    dmini_context_t ctx;    // NULL once already destroyed
-    int refcount;           // Number of pending_driver_t entries still referencing ctx
+    char* path;             // Config file path (owned)
+    dmini_context_t ctx;    // Parsed INI while a driver of this file is being configured, else NULL
+    int refcount;           // Number of pending_driver_t entries not configured yet
 } config_file_entry_t;
 
 /**
@@ -208,7 +216,6 @@ typedef struct
     char module_name[DMOD_MAX_MODULE_NAME_LENGTH];   // Driver module to configure
     char section_name[DMOD_MAX_MODULE_NAME_LENGTH];  // Section within config_ctx (only if has_section)
     bool has_section;                                // Whether section_name is a real INI section
-    dmini_context_t config_ctx;                       // INI context (owned by file_entry, not by this entry)
     config_file_entry_t* file_entry;                  // Shared config file this entry was queued from
     int driver_order;                                 // Explicit ordering group (default 0)
     bool configured;                                  // Already turned into a driver_node_t
@@ -291,6 +298,8 @@ static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* c
 static int collect_section_driver_configs(dmlist_context_t* pending, config_file_entry_t* file_entry);
 static bool add_pending_driver(dmlist_context_t* pending, const char* module_name, config_file_entry_t* file_entry, const char* section_name, int driver_order);
 static void release_config_file_ref(config_file_entry_t* file_entry);
+static dmini_context_t acquire_config_file(dmlist_context_t* pending, config_file_entry_t* file_entry);
+static void release_config_file(config_file_entry_t* file_entry);
 static int configure_pending_drivers(dmfsi_context_t ctx, dmlist_context_t* pending);
 static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry);
 static bool configure_required_dependencies(dmfsi_context_t ctx, dmlist_context_t* pending, pending_driver_t* entry);
@@ -1365,10 +1374,8 @@ static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const
     for (size_t i = 0; i < config_files_count; i++)
     {
         config_file_entry_t* file_entry = (config_file_entry_t*)dmlist_get(config_files, i);
-        if (file_entry->ctx != NULL)
-        {
-            dmini_destroy(file_entry->ctx);
-        }
+        release_config_file(file_entry);
+        Dmod_Free(file_entry->path);
         Dmod_Free(file_entry);
     }
     dmlist_destroy(config_files);
@@ -1438,11 +1445,13 @@ static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* c
             }
             file_entry->ctx = config_ctx;
             file_entry->refcount = 0;
+            file_entry->path = Dmod_StrDup(full_path);
 
-            if (!dmlist_push_back(config_files, file_entry))
+            if (file_entry->path == NULL || !dmlist_push_back(config_files, file_entry))
             {
                 DMOD_LOG_ERROR("Failed to track config context for: %s\n", full_path);
                 dmini_destroy(config_ctx);
+                Dmod_Free(file_entry->path);
                 Dmod_Free(file_entry);
                 continue;
             }
@@ -1459,6 +1468,10 @@ static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* c
                     DMOD_LOG_ERROR("Failed to queue driver configuration: %s\n", module_name);
                 }
             }
+
+            // Everything needed to queue the drivers is copied out - the file is
+            // parsed again when one of them is configured.
+            release_config_file(file_entry);
         }
         else
         {
@@ -1692,7 +1705,6 @@ static bool add_pending_driver(dmlist_context_t* pending, const char* module_nam
     memset(new_entry, 0, sizeof(*new_entry));
     strncpy(new_entry->module_name, module_name, sizeof(new_entry->module_name));
     new_entry->module_name[sizeof(new_entry->module_name) - 1] = '\0';
-    new_entry->config_ctx = file_entry->ctx;
     new_entry->file_entry = file_entry;
     new_entry->driver_order = driver_order;
     if (section_name != NULL)
@@ -1735,7 +1747,61 @@ static void release_config_file_ref(config_file_entry_t* file_entry)
     if (file_entry == NULL) return;
 
     file_entry->refcount--;
-    if (file_entry->refcount <= 0 && file_entry->ctx != NULL)
+    if (file_entry->refcount <= 0)
+    {
+        release_config_file(file_entry);
+    }
+}
+
+/**
+ * @brief Parse a queued config file (again) for configuring one of its drivers
+ *
+ * Any other file still parsed for an earlier driver is released first, so at
+ * most one file is parsed at a time; the same file stays parsed for its
+ * following drivers instead of being parsed once per driver.
+ *
+ * @return The parsed INI, owned by file_entry, or NULL if the file cannot be
+ *         parsed.
+ */
+static dmini_context_t acquire_config_file(dmlist_context_t* pending, config_file_entry_t* file_entry)
+{
+    size_t count = dmlist_size(pending);
+    for (size_t i = 0; i < count; i++)
+    {
+        pending_driver_t* other = (pending_driver_t*)dmlist_get(pending, i);
+        if (other->file_entry != file_entry)
+        {
+            release_config_file(other->file_entry);
+        }
+    }
+
+    if (file_entry->ctx != NULL)
+    {
+        return file_entry->ctx;
+    }
+
+    file_entry->ctx = dmini_create();
+    if (file_entry->ctx == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to create INI context\n");
+        return NULL;
+    }
+    if (dmini_parse_file(file_entry->ctx, file_entry->path) != DMINI_OK)
+    {
+        DMOD_LOG_ERROR("Failed to parse INI file: %s\n", file_entry->path);
+        release_config_file(file_entry);
+        return NULL;
+    }
+    return file_entry->ctx;
+}
+
+/**
+ * @brief Free the parsed INI of a config file - it is parsed again if another
+ *        of its drivers still needs it (see config_file_entry_t)
+ */
+static void release_config_file(config_file_entry_t* file_entry)
+{
+    if (file_entry != NULL && file_entry->ctx != NULL)
     {
         dmini_destroy(file_entry->ctx);
         file_entry->ctx = NULL;
@@ -1798,16 +1864,26 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     // used to do around each dmdrvi_create call. Without this, section == NULL
     // lookups inside the driver resolve to the empty global section instead of
     // the intended one, silently handing the driver only default values.
+    // Parsed only now, after the dependencies above (which may have parsed
+    // other files) - see config_file_entry_t.
+    dmini_context_t config_ctx = acquire_config_file(pending, entry->file_entry);
+    if (config_ctx == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to configure driver: %s\n", entry->module_name);
+        release_config_file_ref(entry->file_entry);
+        return false;
+    }
+
     driver_node_t* driver_node;
     if (entry->has_section)
     {
-        dmini_set_active_section(entry->config_ctx, entry->section_name, 0);
-        driver_node = configure_driver(entry->module_name, entry->config_ctx, entry->section_name);
-        dmini_clear_active_section(entry->config_ctx, 0);
+        dmini_set_active_section(config_ctx, entry->section_name, 0);
+        driver_node = configure_driver(entry->module_name, config_ctx, entry->section_name);
+        dmini_clear_active_section(config_ctx, 0);
     }
     else
     {
-        driver_node = configure_driver(entry->module_name, entry->config_ctx, NULL);
+        driver_node = configure_driver(entry->module_name, config_ctx, NULL);
     }
 
     if (driver_node == NULL)
