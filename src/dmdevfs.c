@@ -40,40 +40,28 @@
  */
 #define DMDEVFS_NULL_DEVICE_NAME "null"
 
-/**
- * @brief Device classes dmdevfs reports nodes under to libsystemd
- *
- * Once a node's absolute path is known, dmdevfs asks its driver what the node
- * is and reports it to libsystemd, so device rules can start services for it
- * (see report_node_added()):
- *
- *  - "monitor": the driver answers DMDRVI_IOCTL_MONITOR_GET_POLICY - a
- *    monitor service (dmdevmon) has to drive it;
- *  - "block": the driver answers DMDRVI_IOCTL_BLOCK_GET_INFO - a block
- *    device, e.g. for automount.
- *
- * The device name is the node path relative to the mount with '/' replaced
- * by '_' (unit names cannot contain '/'): "/dmsdio0/0" -> "dmsdio0_0". The
- * user value is the node's absolute path. Removal is reported when the node
- * goes away (dmdrvi_device_unavailable() or teardown), which makes libsystemd
- * stop the matching units.
+/*
+ * Device classes dmdevfs reports nodes under to libsystemd: DMDEVFS_CLASS_*
+ * in dmdevfs.h (see report_node_added()).
  */
-#define DMDEVFS_CLASS_MONITOR   "monitor"
-#define DMDEVFS_CLASS_BLOCK     "block"
 
 /**
  * @brief Bits of driver_node_t::report_mask / driver_node_t::reported
  */
 #define DMDEVFS_REPORT_MONITOR  0x01u
 #define DMDEVFS_REPORT_BLOCK    0x02u
-#define DMDEVFS_REPORT_ALL      (DMDEVFS_REPORT_MONITOR | DMDEVFS_REPORT_BLOCK)
+#define DMDEVFS_REPORT_DISPLAY  0x04u
+#define DMDEVFS_REPORT_INPUT    0x08u
+#define DMDEVFS_REPORT_ALL      (DMDEVFS_REPORT_MONITOR | DMDEVFS_REPORT_BLOCK | \
+                                 DMDEVFS_REPORT_DISPLAY | DMDEVFS_REPORT_INPUT)
 
 /**
  * @brief Configuration key limiting what a device's nodes are reported as
  *
- * "all" (default), "monitor", "block" or "none" - e.g. "none" for raw flash
- * that must never be picked up by automount. Read from the same place as
- * friends_group (see configure_driver()); hot-plugged nodes inherit it.
+ * "all" (default), "monitor", "block", "display", "input" or "none" - e.g.
+ * "none" for raw flash that must never be picked up by automount. Read from
+ * the same place as friends_group (see configure_driver()); hot-plugged nodes
+ * inherit it.
  */
 #define DMDEVFS_REPORT_KEY      "report"
 
@@ -334,6 +322,7 @@ static int compare_mount_context( const void* data, const void* user_data );
 static int compare_mount_owns_context( const void* data, const void* user_data );
 static int compare_mount_owns_dynamic_device( const void* data, const void* user_data );
 static int build_absolute_path( const char* mount_path, const char* node_path, char* out, size_t out_size );
+static int get_friend( dmfsi_context_t mount, driver_node_t* node, dmdrvi_devfs_friend_t* arg );
 static void notify_driver_path_ready( const char* mount_path, driver_node_t* node );
 static uint8_t read_report_mask( dmini_context_t config_ctx, const char* section_name, const char* driver_name );
 static void report_node_added( const char* abs_path, driver_node_t* node );
@@ -836,6 +825,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx,
     }
 
     file_handle_t* handle = (file_handle_t*)fp;
+
+    // Device file system commands are answered here, never by the driver
+    if(request == DMDRVI_IOCTL_DEVFS_GET_FRIEND)
+    {
+        return get_friend(ctx, handle->driver, (dmdrvi_devfs_friend_t*)arg);
+    }
 
     if(handle->driver->is_builtin)
     {
@@ -2932,6 +2927,14 @@ static uint8_t read_report_mask( dmini_context_t config_ctx, const char* section
     {
         return DMDEVFS_REPORT_BLOCK;
     }
+    if (strcmp(value, DMDEVFS_CLASS_DISPLAY) == 0)
+    {
+        return DMDEVFS_REPORT_DISPLAY;
+    }
+    if (strcmp(value, DMDEVFS_CLASS_INPUT) == 0)
+    {
+        return DMDEVFS_REPORT_INPUT;
+    }
 
     DMOD_LOG_WARN("Unknown %s=%s for driver %s, reporting all classes\n", DMDEVFS_REPORT_KEY, value, driver_name);
     return DMDEVFS_REPORT_ALL;
@@ -2958,9 +2961,10 @@ static void build_report_name( const char* node_path, char* out, size_t out_size
  * @brief Ask a node's driver which classes the node belongs to
  *
  * Opens the node read-only through its driver, issues
- * DMDRVI_IOCTL_MONITOR_GET_POLICY and/or DMDRVI_IOCTL_BLOCK_GET_INFO (only
- * those allowed by @p wanted) and closes it again. A driver that cannot be
- * opened, or answers neither, yields 0 - nothing is reported for it.
+ * DMDRVI_IOCTL_MONITOR_GET_POLICY, DMDRVI_IOCTL_BLOCK_GET_INFO,
+ * DMDRVI_IOCTL_GFX_GET_INFO and/or DMDRVI_IOCTL_INPUT_GET_INFO (only those
+ * allowed by @p wanted) and closes it again. A driver that cannot be opened,
+ * or answers none of them, yields 0 - nothing is reported for it.
  *
  * Must be called without g_devfs_mutex held (driver code).
  */
@@ -2992,6 +2996,18 @@ static uint8_t probe_node_classes( driver_node_t* node, uint8_t wanted )
         dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_BLOCK_GET_INFO, &info) == 0)
     {
         classes |= DMDEVFS_REPORT_BLOCK;
+    }
+    dmdrvi_gfx_info_t gfx;
+    if ((wanted & DMDEVFS_REPORT_DISPLAY) != 0 &&
+        dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_GFX_GET_INFO, &gfx) == 0)
+    {
+        classes |= DMDEVFS_REPORT_DISPLAY;
+    }
+    dmdrvi_input_info_t input;
+    if ((wanted & DMDEVFS_REPORT_INPUT) != 0 &&
+        dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_INPUT_GET_INFO, &input) == 0)
+    {
+        classes |= DMDEVFS_REPORT_INPUT;
     }
 
     dmdrvi_close(node->driver_context, handle);
@@ -3061,6 +3077,14 @@ static void report_node_added( const char* abs_path, driver_node_t* node )
     {
         report_node_class(DMDEVFS_CLASS_BLOCK, name, abs_path, true);
     }
+    if ((classes & DMDEVFS_REPORT_DISPLAY) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_DISPLAY, name, abs_path, true);
+    }
+    if ((classes & DMDEVFS_REPORT_INPUT) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_INPUT, name, abs_path, true);
+    }
 }
 
 /**
@@ -3082,6 +3106,14 @@ static void report_node_removed( driver_node_t* node )
 
     path_t name;
     build_report_name(node->path, name, sizeof(name));
+    if ((classes & DMDEVFS_REPORT_INPUT) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_INPUT, name, NULL, false);
+    }
+    if ((classes & DMDEVFS_REPORT_DISPLAY) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_DISPLAY, name, NULL, false);
+    }
     if ((classes & DMDEVFS_REPORT_BLOCK) != 0)
     {
         report_node_class(DMDEVFS_CLASS_BLOCK, name, NULL, false);
@@ -3090,6 +3122,77 @@ static void report_node_removed( driver_node_t* node )
     {
         report_node_class(DMDEVFS_CLASS_MONITOR, name, NULL, false);
     }
+}
+
+// ============================================================================
+//                      Friends of a node (DMDRVI_IOCTL_DEVFS_GET_FRIEND)
+// ============================================================================
+
+typedef struct
+{
+    dmfsi_context_t         mount;
+    driver_node_t*          self;
+    uint32_t                index;          // Members still to skip
+    dmdrvi_devfs_friend_t*  out;
+    bool                    found;
+} friend_lookup_t;
+
+/**
+ * @brief dmlist_foreach() callback: the index-th other member of a friends group
+ */
+static bool find_friend( void* data, void* user_data )
+{
+    driver_node_t* node = (driver_node_t*)data;
+    friend_lookup_t* lookup = (friend_lookup_t*)user_data;
+    if (node == lookup->self || node->removed || node->is_builtin || node->friends_group == NULL ||
+        strcmp(node->friends_group, lookup->self->friends_group) != 0)
+    {
+        return true;
+    }
+    path_t abs_path;
+    if (build_absolute_path(lookup->mount->mount_path, node->path, abs_path, sizeof(abs_path)) != 0)
+    {
+        return true;
+    }
+    if (lookup->index > 0)
+    {
+        lookup->index--;
+        return true;
+    }
+    strncpy(lookup->out->path, abs_path, sizeof(lookup->out->path) - 1);
+    lookup->out->path[sizeof(lookup->out->path) - 1] = '\0';
+    strncpy(lookup->out->role, (node->friend_role != NULL) ? node->friend_role : "", sizeof(lookup->out->role) - 1);
+    lookup->out->role[sizeof(lookup->out->role) - 1] = '\0';
+    lookup->found = true;
+    return false;
+}
+
+/**
+ * @brief Answer DMDRVI_IOCTL_DEVFS_GET_FRIEND for @p node - never passed to its driver
+ *
+ * Copies everything out under g_devfs_mutex; no driver code and no logging
+ * is called while it is held.
+ *
+ * @return 0, -ENOENT when there is no member arg->index (or no group),
+ *         -EINVAL for a NULL arg
+ */
+static int get_friend( dmfsi_context_t mount, driver_node_t* node, dmdrvi_devfs_friend_t* arg )
+{
+    if (arg == NULL)
+    {
+        return -EINVAL;
+    }
+    friend_lookup_t lookup = { .mount = mount, .self = node, .index = arg->index, .out = arg, .found = false };
+    arg->path[0] = '\0';
+    arg->role[0] = '\0';
+
+    dmosi_mutex_lock(g_devfs_mutex);
+    if (mount->ready && node->friends_group != NULL)
+    {
+        dmlist_foreach(mount->drivers, find_friend, &lookup);
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+    return lookup.found ? 0 : -ENOENT;
 }
 
 // ============================================================================

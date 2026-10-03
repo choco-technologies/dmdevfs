@@ -6,6 +6,8 @@
 #include "dmhaman.h"
 #include "libsystemd.h"
 #include "dmdevfs_mockdrv.h"
+#include "dmdrvi_ioctl.h"
+#include <string.h>
 #include <errno.h>
 
 /*
@@ -14,8 +16,9 @@
  * dmdevfs is mounted at /dev from fixtures/config with the test driver
  * dmdevfs_mockdrv (mockdrv/). libsystemd has the units from fixtures/units
  * and the rules from fixtures/rules loaded, so every report dmdevfs makes
- * starts a real process (dmdevfs_testsvc) as mon@<name> ("monitor") or
- * blk@<name> ("block"), and every removal stops it again - both observable
+ * starts a real process (dmdevfs_testsvc) as mon@<name> ("monitor"),
+ * blk@<name> ("block"), dsp@<name> ("display") or inp@<name> ("input"), and
+ * every removal stops it again - both observable
  * through libsystemd_status(). A unit that was never reported does not exist
  * at all (-ENOENT).
  *
@@ -74,9 +77,12 @@ void dmod_test_setup(void)
     if (g_mount != NULL)
     {
         g_fs.mounted(g_mount, "/dev");
-        /* Every mount starts mon@dmdevfs_mockdrv0 - let it come up before
-         * any step (or the teardown) may stop it. */
+        /* Every mount starts mon@dmdevfs_mockdrv0, dsp@dmdevfs_mockdrv3 and
+         * inp@dmdevfs_mockdrv4 - let them come up before any step (or the
+         * teardown) may stop them. */
         wait_ready("mon@dmdevfs_mockdrv0", "/dev/dmdevfs_mockdrv0");
+        wait_ready("dsp@dmdevfs_mockdrv3", "/dev/dmdevfs_mockdrv3");
+        wait_ready("inp@dmdevfs_mockdrv4", "/dev/dmdevfs_mockdrv4");
     }
 }
 
@@ -173,6 +179,55 @@ DMOD_TEST_STEP(dmdevfs_skips_opted_out_and_unmonitored_nodes)
     DMOD_TEST_EXPECT_EQ(unit_state("mon@dmdevfs_mockdrv1"), -1);    /* report=none */
     DMOD_TEST_EXPECT_EQ(unit_state("mon@dmdevfs_mockdrv2"), -1);    /* no GET_POLICY */
     DMOD_TEST_EXPECT_EQ(unit_state("blk@dmdevfs_mockdrv0"), -1);    /* host node is no block device */
+}
+
+DMOD_TEST_STEP(dmdevfs_reports_display_and_input_nodes)
+{
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+    DMOD_TEST_EXPECT_TRUE(wait_ready("dsp@dmdevfs_mockdrv3", "/dev/dmdevfs_mockdrv3"));
+    DMOD_TEST_EXPECT_TRUE(wait_ready("inp@dmdevfs_mockdrv4", "/dev/dmdevfs_mockdrv4"));
+    DMOD_TEST_EXPECT_EQ(unit_state("inp@dmdevfs_mockdrv3"), -1);    /* display only */
+    DMOD_TEST_EXPECT_EQ(unit_state("dsp@dmdevfs_mockdrv4"), -1);    /* input only */
+    DMOD_TEST_EXPECT_EQ(unit_state("mon@dmdevfs_mockdrv3"), -1);
+    DMOD_TEST_EXPECT_EQ(unit_state("dsp@dmdevfs_mockdrv5"), -1);    /* report=input */
+    DMOD_TEST_EXPECT_EQ(unit_state("inp@dmdevfs_mockdrv5"), -1);    /* ... and no input device */
+    DMOD_TEST_EXPECT_EQ(unit_state("dsp@dmdevfs_mockdrv2"), -1);    /* plain node */
+
+    g_fs.deinit(g_mount);
+    g_mount = NULL;
+    DMOD_TEST_EXPECT_TRUE(wait_state("dsp@dmdevfs_mockdrv3", DMOSI_PROCESS_STATE_TERMINATED));
+    DMOD_TEST_EXPECT_TRUE(wait_state("inp@dmdevfs_mockdrv4", DMOSI_PROCESS_STATE_TERMINATED));
+}
+
+/** DMDRVI_IOCTL_DEVFS_GET_FRIEND on @p node through dmdevfs. */
+static int get_friend(const char* node, uint32_t index, dmdrvi_devfs_friend_t* f)
+{
+    void* file = NULL;
+    if (g_fs.fopen(g_mount, &file, node, DMFSI_O_RDONLY, 0) != DMFSI_OK)
+    {
+        return -ENODEV;
+    }
+    f->index = index;
+    int ret = g_fs.ioctl(g_mount, file, DMDRVI_IOCTL_DEVFS_GET_FRIEND, f);
+    g_fs.fclose(g_mount, file);
+    return ret;
+}
+
+DMOD_TEST_STEP(dmdevfs_finds_friends_of_a_node)
+{
+    dmdrvi_devfs_friend_t f;
+
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv3", 0, &f), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(f.path, "/dev/dmdevfs_mockdrv4"), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(f.role, "touch"), 0);
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv3", 1, &f), -ENOENT);
+
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv4", 0, &f), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(f.path, "/dev/dmdevfs_mockdrv3"), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(f.role, ""), 0);
+
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv0", 0, &f), -ENOENT);   /* no group */
 }
 
 DMOD_TEST_STEP(dmdevfs_reports_hot_plugged_block_node_and_its_removal)
