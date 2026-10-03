@@ -10,8 +10,10 @@
 /*
  * Test driver for the libsystemd node reporting of dmdevfs.
  *
- * Configuration keys: `major` (device number) and `monitor` ("true": the host
- * node implements the monitor contract). Its policy comes from
+ * Configuration keys: `major` (device number), `monitor` ("true": the host
+ * node implements the monitor contract), `display` / `input` ("true": the
+ * host node answers DMDRVI_IOCTL_GFX_GET_INFO / DMDRVI_IOCTL_INPUT_GET_INFO,
+ * as a display or an input device would). Its policy comes from
  * `event_handler`, `settle_ms` and `poll_interval_ms`; MONITOR_EVENT and
  * MONITOR_REFRESH calls are only counted (DMDEVFS_MOCKDRV_IOCTL_GET_STATS),
  * as are the opens of the host node and of its child.
@@ -33,6 +35,8 @@ struct dmdrvi_context
     uint32_t    magic;
     uint8_t     major;
     bool        monitor;
+    bool        display;
+    bool        input;
     bool        plugged;
     dmdrvi_monitor_policy_t     policy;
     volatile uint32_t           events;     /* MONITOR_EVENT calls */
@@ -209,6 +213,8 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, dmdrvi_context_t, _create,
     ctx->magic   = MOCKDRV_CONTEXT_MAGIC;
     ctx->major   = (uint8_t)dmini_get_int(config, NULL, "major", 0);
     ctx->monitor = (strcmp(monitor, "true") == 0);
+    ctx->display = (strcmp(dmini_get_string(config, NULL, "display", "false"), "true") == 0);
+    ctx->input   = (strcmp(dmini_get_string(config, NULL, "input", "false"), "true") == 0);
     ctx->plugged = false;
     ctx->events = 0;
     ctx->refreshes = 0;
@@ -345,6 +351,25 @@ static int host_ioctl(dmdrvi_context_t context, int command, void* arg)
         case DMDRVI_IOCTL_MONITOR_EVENT:
         case DMDRVI_IOCTL_MONITOR_REFRESH:
             return monitor_ioctl(context, command, arg);
+        case DMDRVI_IOCTL_GFX_GET_INFO:
+            if (!context->display || arg == NULL)
+            {
+                return -ENOTTY;
+            }
+            memset(arg, 0, sizeof(dmdrvi_gfx_info_t));
+            ((dmdrvi_gfx_info_t*)arg)->width = 480;
+            ((dmdrvi_gfx_info_t*)arg)->height = 272;
+            return 0;
+        case DMDRVI_IOCTL_INPUT_GET_INFO:
+            if (!context->input || arg == NULL)
+            {
+                return -ENOTTY;
+            }
+            memset(arg, 0, sizeof(dmdrvi_input_info_t));
+            ((dmdrvi_input_info_t*)arg)->type = DMDRVI_INPUT_TYPE_TOUCHSCREEN;
+            ((dmdrvi_input_info_t*)arg)->width = 480;
+            ((dmdrvi_input_info_t*)arg)->height = 272;
+            return 0;
         case DMDEVFS_MOCKDRV_IOCTL_SET_MEDIA:
             if (context->plugged || arg == NULL)
             {

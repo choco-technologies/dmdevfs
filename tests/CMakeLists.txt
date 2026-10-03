@@ -96,7 +96,9 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
 target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
     DMDEVFS_TEST_FIXTURES_DIR="fixtures"
 )
+# dmdrvi: DMDRVI_IOCTL_DEVFS_GET_FRIEND (2.4)
 dmod_link_modules(${DMOD_MODULE_NAME}
+    dmdrvi@>=2.4
     dmfsi
     dmhaman
     dmosi
@@ -122,7 +124,7 @@ target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
-    dmdrvi@>=2.1
+    dmdrvi@>=2.3
     dmhaman
     dmosi
 )
@@ -141,7 +143,7 @@ target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
-    dmdrvi@>=2.1
+    dmdrvi@>=2.3
     dmhaman
     dmosi
     libsystemd
@@ -161,7 +163,7 @@ target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
-    dmdrvi@>=2.1
+    dmdrvi@>=2.3
     dmhaman
     dmosi
     libsystemd
