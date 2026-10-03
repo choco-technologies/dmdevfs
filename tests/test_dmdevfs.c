@@ -200,34 +200,61 @@ DMOD_TEST_STEP(dmdevfs_reports_display_and_input_nodes)
 }
 
 /** DMDRVI_IOCTL_DEVFS_GET_FRIEND on @p node through dmdevfs. */
-static int get_friend(const char* node, uint32_t index, dmdrvi_devfs_friend_t* f)
+static int get_friend(const char* node, dmdrvi_devfs_friend_t* f)
 {
     void* file = NULL;
     if (g_fs.fopen(g_mount, &file, node, DMFSI_O_RDONLY, 0) != DMFSI_OK)
     {
         return -ENODEV;
     }
-    f->index = index;
     int ret = g_fs.ioctl(g_mount, file, DMDRVI_IOCTL_DEVFS_GET_FRIEND, f);
     g_fs.fclose(g_mount, file);
     return ret;
 }
 
+static void ask_friend(dmdrvi_devfs_friend_t* f, uint32_t index, char* path, size_t path_size, char* role, size_t role_size)
+{
+    memset(f, 0, sizeof(*f));
+    f->index = index;
+    f->path = path;
+    f->path_size = path_size;
+    f->role = role;
+    f->role_size = role_size;
+}
+
 DMOD_TEST_STEP(dmdevfs_finds_friends_of_a_node)
 {
     dmdrvi_devfs_friend_t f;
+    char path[64], role[16];
 
     DMOD_TEST_EXPECT_NOT_NULL(g_mount);
-    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv3", 0, &f), 0);
-    DMOD_TEST_EXPECT_EQ(strcmp(f.path, "/dev/dmdevfs_mockdrv4"), 0);
-    DMOD_TEST_EXPECT_EQ(strcmp(f.role, "touch"), 0);
-    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv3", 1, &f), -ENOENT);
 
-    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv4", 0, &f), 0);
-    DMOD_TEST_EXPECT_EQ(strcmp(f.path, "/dev/dmdevfs_mockdrv3"), 0);
-    DMOD_TEST_EXPECT_EQ(strcmp(f.role, ""), 0);
+    /* NULL buffers: the lengths only */
+    ask_friend(&f, 0, NULL, 0, NULL, 0);
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv3", &f), -ERANGE);
+    DMOD_TEST_EXPECT_EQ(f.path_length, strlen("/dev/dmdevfs_mockdrv4"));
+    DMOD_TEST_EXPECT_EQ(f.role_length, strlen("touch"));
 
-    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv0", 0, &f), -ENOENT);   /* no group */
+    /* Exactly large enough */
+    ask_friend(&f, 0, path, strlen("/dev/dmdevfs_mockdrv4") + 1, role, strlen("touch") + 1);
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv3", &f), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(path, "/dev/dmdevfs_mockdrv4"), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(role, "touch"), 0);
+
+    /* One byte short */
+    ask_friend(&f, 0, path, strlen("/dev/dmdevfs_mockdrv4"), role, sizeof(role));
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv3", &f), -ERANGE);
+
+    ask_friend(&f, 1, path, sizeof(path), role, sizeof(role));
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv3", &f), -ENOENT);
+
+    ask_friend(&f, 0, path, sizeof(path), role, sizeof(role));
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv4", &f), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(path, "/dev/dmdevfs_mockdrv3"), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(role, ""), 0);
+
+    ask_friend(&f, 0, path, sizeof(path), role, sizeof(role));
+    DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv0", &f), -ENOENT);   /* no group */
 }
 
 DMOD_TEST_STEP(dmdevfs_reports_hot_plugged_block_node_and_its_removal)

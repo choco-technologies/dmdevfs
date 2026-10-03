@@ -3130,11 +3130,9 @@ static void report_node_removed( driver_node_t* node )
 
 typedef struct
 {
-    dmfsi_context_t         mount;
     driver_node_t*          self;
     uint32_t                index;          // Members still to skip
-    dmdrvi_devfs_friend_t*  out;
-    bool                    found;
+    driver_node_t*          found;
 } friend_lookup_t;
 
 /**
@@ -3149,32 +3147,39 @@ static bool find_friend( void* data, void* user_data )
     {
         return true;
     }
-    path_t abs_path;
-    if (build_absolute_path(lookup->mount->mount_path, node->path, abs_path, sizeof(abs_path)) != 0)
-    {
-        return true;
-    }
     if (lookup->index > 0)
     {
         lookup->index--;
         return true;
     }
-    strncpy(lookup->out->path, abs_path, sizeof(lookup->out->path) - 1);
-    lookup->out->path[sizeof(lookup->out->path) - 1] = '\0';
-    strncpy(lookup->out->role, (node->friend_role != NULL) ? node->friend_role : "", sizeof(lookup->out->role) - 1);
-    lookup->out->role[sizeof(lookup->out->role) - 1] = '\0';
-    lookup->found = true;
+    lookup->found = node;
     return false;
+}
+
+/**
+ * @brief Copy @p len bytes of @p src and a terminator into @p dst, if it fits
+ */
+static bool copy_out( char* dst, size_t dst_size, const char* src, size_t len )
+{
+    if (dst == NULL || dst_size <= len)
+    {
+        return false;
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+    return true;
 }
 
 /**
  * @brief Answer DMDRVI_IOCTL_DEVFS_GET_FRIEND for @p node - never passed to its driver
  *
- * Copies everything out under g_devfs_mutex; no driver code and no logging
- * is called while it is held.
+ * Writes straight into the caller's buffers - no length limit of its own.
+ * Everything is done under g_devfs_mutex; no driver code and no logging is
+ * called while it is held.
  *
  * @return 0, -ENOENT when there is no member arg->index (or no group),
- *         -EINVAL for a NULL arg
+ *         -ERANGE when a buffer is too small (lengths filled in), -EINVAL
+ *         for a NULL arg
  */
 static int get_friend( dmfsi_context_t mount, driver_node_t* node, dmdrvi_devfs_friend_t* arg )
 {
@@ -3182,17 +3187,38 @@ static int get_friend( dmfsi_context_t mount, driver_node_t* node, dmdrvi_devfs_
     {
         return -EINVAL;
     }
-    friend_lookup_t lookup = { .mount = mount, .self = node, .index = arg->index, .out = arg, .found = false };
-    arg->path[0] = '\0';
-    arg->role[0] = '\0';
+    arg->path_length = 0;
+    arg->role_length = 0;
 
+    friend_lookup_t lookup = { .self = node, .index = arg->index, .found = NULL };
+    int ret = -ENOENT;
     dmosi_mutex_lock(g_devfs_mutex);
     if (mount->ready && node->friends_group != NULL)
     {
         dmlist_foreach(mount->drivers, find_friend, &lookup);
     }
+    if (lookup.found != NULL)
+    {
+        /* Absolute path: the mount path (nothing for "/") followed by the node path */
+        const char* prefix = (strcmp(mount->mount_path, ROOT_DIRECTORY_NAME) == 0) ? "" : mount->mount_path;
+        const char* role = (lookup.found->friend_role != NULL) ? lookup.found->friend_role : "";
+        size_t prefix_len = strlen(prefix);
+        size_t node_len = strlen(lookup.found->path);
+        arg->path_length = prefix_len + node_len;
+        arg->role_length = strlen(role);
+
+        bool fits = arg->path != NULL && arg->path_size > arg->path_length &&
+                    arg->role != NULL && arg->role_size > arg->role_length;
+        if (fits)
+        {
+            memcpy(arg->path, prefix, prefix_len);
+            (void)copy_out(arg->path + prefix_len, arg->path_size - prefix_len, lookup.found->path, node_len);
+            (void)copy_out(arg->role, arg->role_size, role, arg->role_length);
+        }
+        ret = fits ? 0 : -ERANGE;
+    }
     dmosi_mutex_unlock(g_devfs_mutex);
-    return lookup.found ? 0 : -ENOENT;
+    return ret;
 }
 
 // ============================================================================
