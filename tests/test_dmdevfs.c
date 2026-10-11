@@ -17,7 +17,8 @@
  * dmdevfs_mockdrv (mockdrv/). libsystemd has the units from fixtures/units
  * and the rules from fixtures/rules loaded, so every report dmdevfs makes
  * starts a real process (dmdevfs_testsvc) as mon@<name> ("monitor"),
- * blk@<name> ("block"), dsp@<name> ("display") or inp@<name> ("input"), and
+ * blk@<name> ("block"), dsp@<name> ("display"), inp@<name> ("input") or
+ * aud@<name> ("audio"), and
  * every removal stops it again - both observable
  * through libsystemd_status(). A unit that was never reported does not exist
  * at all (-ENOENT).
@@ -77,12 +78,13 @@ void dmod_test_setup(void)
     if (g_mount != NULL)
     {
         g_fs.mounted(g_mount, "/dev");
-        /* Every mount starts mon@dmdevfs_mockdrv0, dsp@dmdevfs_mockdrv3 and
-         * inp@dmdevfs_mockdrv4 - let them come up before any step (or the
-         * teardown) may stop them. */
+        /* Every mount starts mon@dmdevfs_mockdrv0, dsp@dmdevfs_mockdrv3,
+         * inp@dmdevfs_mockdrv4 and aud@dmdevfs_mockdrv6 - let them come up
+         * before any step (or the teardown) may stop them. */
         wait_ready("mon@dmdevfs_mockdrv0", "/dev/dmdevfs_mockdrv0");
         wait_ready("dsp@dmdevfs_mockdrv3", "/dev/dmdevfs_mockdrv3");
         wait_ready("inp@dmdevfs_mockdrv4", "/dev/dmdevfs_mockdrv4");
+        wait_ready("aud@dmdevfs_mockdrv6", "/dev/dmdevfs_mockdrv6");
     }
 }
 
@@ -197,6 +199,21 @@ DMOD_TEST_STEP(dmdevfs_reports_display_and_input_nodes)
     g_mount = NULL;
     DMOD_TEST_EXPECT_TRUE(wait_state("dsp@dmdevfs_mockdrv3", DMOSI_PROCESS_STATE_TERMINATED));
     DMOD_TEST_EXPECT_TRUE(wait_state("inp@dmdevfs_mockdrv4", DMOSI_PROCESS_STATE_TERMINATED));
+}
+
+DMOD_TEST_STEP(dmdevfs_reports_audio_nodes)
+{
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+    DMOD_TEST_EXPECT_TRUE(wait_ready("aud@dmdevfs_mockdrv6", "/dev/dmdevfs_mockdrv6"));
+    DMOD_TEST_EXPECT_EQ(unit_state("dsp@dmdevfs_mockdrv6"), -1);    /* audio only */
+    DMOD_TEST_EXPECT_EQ(unit_state("mon@dmdevfs_mockdrv6"), -1);
+    DMOD_TEST_EXPECT_EQ(unit_state("aud@dmdevfs_mockdrv7"), -1);    /* report=block */
+    DMOD_TEST_EXPECT_EQ(unit_state("aud@dmdevfs_mockdrv3"), -1);    /* display, no audio */
+    DMOD_TEST_EXPECT_EQ(unit_state("aud@dmdevfs_mockdrv2"), -1);    /* plain node */
+
+    g_fs.deinit(g_mount);
+    g_mount = NULL;
+    DMOD_TEST_EXPECT_TRUE(wait_state("aud@dmdevfs_mockdrv6", DMOSI_PROCESS_STATE_TERMINATED));
 }
 
 /** DMDRVI_IOCTL_DEVFS_GET_FRIEND on @p node through dmdevfs. */
