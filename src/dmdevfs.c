@@ -171,6 +171,7 @@ typedef struct
     dmdrvi_context_t context;
     dmdrvi_dev_num_t dev_num;
     bool available;   // true: device became available, false: no longer available
+    dmfsi_context_t mounted;    // Not NULL: report the nodes of this mount instead (see dmfsi_dmdevfs_mounted())
 } hotplug_event_t;
 
 /**
@@ -326,6 +327,7 @@ static int compare_mount_owns_dynamic_device( const void* data, const void* user
 static int build_absolute_path( const char* mount_path, const char* node_path, char* out, size_t out_size );
 static int get_friend( dmfsi_context_t mount, driver_node_t* node, dmdrvi_devfs_friend_t* arg );
 static void notify_driver_path_ready( const char* mount_path, driver_node_t* node );
+static void report_node_ready( const char* mount_path, driver_node_t* node );
 static uint8_t read_report_mask( dmini_context_t config_ctx, const char* section_name, const char* driver_name );
 static void report_node_added( const char* abs_path, driver_node_t* node );
 static void report_node_removed( driver_node_t* node );
@@ -343,6 +345,7 @@ static void hotplug_worker_thread( void* arg );
 static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num, bool available );
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
+static void process_mount_ready( dmfsi_context_t mount );
 
 // ============================================================================
 //                      Module Interface Implementation
@@ -408,6 +411,7 @@ int dmod_deinit(void)
         if (stop_event != NULL)
         {
             stop_event->context = NULL;
+            stop_event->mounted = NULL;
 
             dmosi_mutex_lock(g_hotplug_mutex);
             dmlist_push_back(g_hotplug_events, stop_event);
@@ -1915,6 +1919,7 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     {
         notify_driver_path_ready(mount_path, driver_node);
         notify_friends_about_node(ctx, driver_node, dmdrvi_dev_state_ready);
+        report_node_ready(mount_path, driver_node);
         scan_partitions(ctx, mount_path, driver_node);
     }
 
@@ -2776,6 +2781,7 @@ static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_
     event->context = context;
     event->dev_num = *dev_num;
     event->available = available;
+    event->mounted = NULL;
 
     dmosi_mutex_lock(g_hotplug_mutex);
     bool queued = dmlist_push_back(g_hotplug_events, event);
@@ -2858,8 +2864,10 @@ static int build_absolute_path( const char* mount_path, const char* node_path, c
 }
 
 /**
- * @brief Push a device's now-known absolute path to its driver, if implemented,
- *        and report the node to libsystemd (see report_node_added())
+ * @brief Push a device's now-known absolute path to its driver, if implemented
+ *
+ * The node is reported to libsystemd afterwards, by report_node_ready() -
+ * once its friends are known too (see the callers).
  *
  * Called once dmdevfs itself is ready (mount->ready) and `node` is
  * registered - either while flushing already-registered devices from
@@ -2890,9 +2898,32 @@ static void notify_driver_path_ready( const char* mount_path, driver_node_t* nod
     {
         path_ready(node->driver_context, &node->dev_num, abs_path);
     }
+}
 
-    // After the driver has seen its own path: a service started for the node
-    // may open it right away.
+/**
+ * @brief Report a node to libsystemd (see report_node_added())
+ *
+ * Called after notify_driver_path_ready() and after the node's friends were
+ * broadcast: the driver has seen its own path - a service started for the
+ * node may open it right away - and knows its friends, which the class probe
+ * may need (a codec answers DMDRVI_IOCTL_AUDIO_GET_INFO over its I2C bus
+ * friend).
+ *
+ * Must be called without g_devfs_mutex held (driver code, libsystemd).
+ */
+static void report_node_ready( const char* mount_path, driver_node_t* node )
+{
+    if (node->is_builtin)
+    {
+        return;
+    }
+
+    path_t abs_path;
+    if (build_absolute_path(mount_path, node->path, abs_path, sizeof(abs_path)) != 0)
+    {
+        DMOD_LOG_ERROR("report_node_ready: failed to build absolute path for %s\n", node->path);
+        return;
+    }
     report_node_added(abs_path, node);
 }
 
@@ -3480,8 +3511,8 @@ static void publish_partition( dmfsi_context_t mount, const char* mount_path, dr
  * as "block" and withdrawn together with their parent
  * (remove_partitions_of()).
  *
- * Always runs after notify_driver_path_ready(), whose report_node_added()
- * has already probed the node: only a node reported as "block" is opened
+ * Always runs after report_node_ready(), whose report_node_added() has
+ * already probed the node: only a node reported as "block" is opened
  * again to read its table. Every other node (tty, gpio, dma, ...) is left
  * alone - a second open of each would be wasted, and fails loudly for
  * drivers that open exclusively (e.g. a dmdma stream leased by another
@@ -3711,18 +3742,75 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, void, _mounted, (dmfsi_context_t c
     // handled by process_device_available() directly.
     dmlist_foreach(ctx->drivers, notify_all_drivers_path_ready, ctx->mount_path);
 
-    // Partitions of the block devices configured so far. Bounded by the
-    // count taken first: scan_partitions() appends the partition nodes it
-    // creates, which must not be scanned themselves.
-    size_t configured = dmlist_size(ctx->drivers);
-    for (size_t i = 0; i < configured; i++)
-    {
-        scan_partitions(ctx, ctx->mount_path, (driver_node_t*)dmlist_get(ctx->drivers, i));
-    }
-
     // All absolute paths are known now. Broadcast each group member only
     // after the path_ready pass, so recipients always receive complete info.
     dmlist_foreach(ctx->drivers, notify_all_friends_ready, ctx);
+
+    // The nodes are reported - probed, which talks to the hardware (a codec
+    // answers DMDRVI_IOCTL_AUDIO_GET_INFO over its I2C bus friend) and may
+    // wait - by the hot-plug worker: a file system is mounted at boot, before
+    // the scheduler runs, where nothing may wait (process_mount_ready()).
+    hotplug_event_t* event = Dmod_Malloc(sizeof(hotplug_event_t));
+    if (event == NULL)
+    {
+        DMOD_LOG_ERROR("dmdevfs: out of memory - the nodes of %s are not reported\n", mount_path);
+        return;
+    }
+    memset(event, 0, sizeof(*event));
+    event->mounted = ctx;
+    dmosi_mutex_lock(g_hotplug_mutex);
+    bool queued = dmlist_push_back(g_hotplug_events, event);
+    dmosi_mutex_unlock(g_hotplug_mutex);
+    if (!queued)
+    {
+        Dmod_Free(event);
+        DMOD_LOG_ERROR("dmdevfs: the nodes of %s are not reported\n", mount_path);
+        return;
+    }
+    dmosi_semaphore_post(g_hotplug_semaphore, 1);
+}
+
+/**
+ * @brief Report the nodes a mount had when it became ready, then expose their
+ *        partitions - the rest of dmfsi_dmdevfs_mounted(), on the hot-plug
+ *        worker thread
+ *
+ * Every driver knows its path and its friends by now, which the class probe
+ * may need (report_node_ready()). A node reported meanwhile (a hot-plug
+ * event queued earlier) is left alone, its partitions too.
+ */
+static void process_mount_ready( dmfsi_context_t mount )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    bool live = dmlist_find(g_dmdevfs_mounts, mount, compare_mount_context) != NULL;
+    path_t mount_path;
+    if (live)
+    {
+        strncpy(mount_path, mount->mount_path, sizeof(mount_path));
+        mount_path[sizeof(mount_path) - 1] = '\0';
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+    if (!live)
+    {
+        return;
+    }
+
+    // Bounded by the count taken first: scan_partitions() appends the
+    // partition nodes it creates, which must not be scanned themselves.
+    size_t configured = dmlist_size(mount->drivers);
+    for (size_t i = 0; i < configured; i++)
+    {
+        driver_node_t* node = (driver_node_t*)dmlist_get(mount->drivers, i);
+        dmosi_mutex_lock(g_devfs_mutex);
+        bool reported = node->reported != 0;
+        dmosi_mutex_unlock(g_devfs_mutex);
+        if (reported)
+        {
+            continue;
+        }
+        report_node_ready(mount_path, node);
+        scan_partitions(mount, mount_path, node);
+    }
 }
 
 /**
@@ -3751,6 +3839,12 @@ static void hotplug_worker_thread( void* arg )
 
         if (event == NULL)
         {
+            continue;
+        }
+        if (event->mounted != NULL)
+        {
+            process_mount_ready(event->mounted);
+            Dmod_Free(event);
             continue;
         }
         if (event->context == NULL)
@@ -3894,6 +3988,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     {
         notify_driver_path_ready(mount_path, new_node);
         notify_friends_about_node(mount, new_node, dmdrvi_dev_state_ready);
+        report_node_ready(mount_path, new_node);
         scan_partitions(mount, mount_path, new_node);
     }
 
