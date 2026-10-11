@@ -224,6 +224,14 @@ typedef struct
     int mode;                   // File open mode
     int attr;                   // File attributes
     dmfsi_offset_t offset;      // Current byte offset within the device
+
+    // The driver's functions, resolved once at open: Dmod_GetDifFunction()
+    // compares signatures, too slow for every read and write (an audio
+    // stream writes hundreds of times a second). NULL: not implemented.
+    dmod_dmdrvi_read_t  dmdrvi_read;
+    dmod_dmdrvi_write_t dmdrvi_write;
+    dmod_dmdrvi_ioctl_t dmdrvi_ioctl;
+    dmod_dmdrvi_flush_t dmdrvi_flush;
 } file_handle_t;
 
 /**
@@ -586,6 +594,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         release_driver_node_ref(driver_node);
         return DMFSI_ERR_GENERAL;
     }
+    memset(handle, 0, sizeof(*handle));
 
     if(driver_node->is_builtin)
     {
@@ -615,6 +624,10 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
             release_driver_node_ref(driver_node);
             return DMFSI_ERR_GENERAL;
         }
+        handle->dmdrvi_read  = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_read_sig);
+        handle->dmdrvi_write = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_write_sig);
+        handle->dmdrvi_ioctl = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_ioctl_sig);
+        handle->dmdrvi_flush = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_flush_sig);
     }
 
     handle->driver = driver_node;
@@ -699,8 +712,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
     }
     else
     {
-        // Get the dmdrvi_read function
-        dmod_dmdrvi_read_t dmdrvi_read = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_read_sig);
+        dmod_dmdrvi_read_t dmdrvi_read = handle->dmdrvi_read;
         if(dmdrvi_read == NULL)
         {
             DMOD_LOG_ERROR("Driver does not implement dmdrvi_read\n");
@@ -844,8 +856,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx,
         return DMFSI_ERR_NOT_FOUND;
     }
 
-    // Get the dmdrvi_ioctl function
-    dmod_dmdrvi_ioctl_t dmdrvi_ioctl = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_ioctl_sig);
+    dmod_dmdrvi_ioctl_t dmdrvi_ioctl = handle->dmdrvi_ioctl;
     if(dmdrvi_ioctl == NULL)
     {
         DMOD_LOG_ERROR("Driver does not implement dmdrvi_ioctl\n");
@@ -1025,8 +1036,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fflush, (dmfsi_context_t ctx
         return DMFSI_OK;
     }
 
-    // Get the dmdrvi_flush function
-    dmod_dmdrvi_flush_t dmdrvi_flush = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_flush_sig);
+    dmod_dmdrvi_flush_t dmdrvi_flush = handle->dmdrvi_flush;
     if(dmdrvi_flush == NULL)
     {
         // Flush not supported by driver, return OK
@@ -1067,8 +1077,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _sync, (dmfsi_context_t ctx, 
         return DMFSI_OK;
     }
 
-    // Get the dmdrvi_flush function (sync and flush are equivalent for devices)
-    dmod_dmdrvi_flush_t dmdrvi_flush = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_flush_sig);
+    // (sync and flush are equivalent for devices)
+    dmod_dmdrvi_flush_t dmdrvi_flush = handle->dmdrvi_flush;
     if(dmdrvi_flush == NULL)
     {
         // Sync not supported by driver, return OK
@@ -3315,7 +3325,7 @@ static bool map_node_offset( const driver_node_t* node, dmfsi_offset_t offset, s
  */
 static int write_to_driver( file_handle_t* handle, const void* buffer, size_t size, dmdrvi_ssize_t* bytes_written )
 {
-    dmod_dmdrvi_write_t dmdrvi_write = Dmod_GetDifFunction(handle->driver->driver, dmod_dmdrvi_write_sig);
+    dmod_dmdrvi_write_t dmdrvi_write = handle->dmdrvi_write;
     if(dmdrvi_write == NULL)
     {
         DMOD_LOG_ERROR("Driver does not implement dmdrvi_write\n");
