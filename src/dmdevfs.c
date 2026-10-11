@@ -52,13 +52,15 @@
 #define DMDEVFS_REPORT_BLOCK    0x02u
 #define DMDEVFS_REPORT_DISPLAY  0x04u
 #define DMDEVFS_REPORT_INPUT    0x08u
+#define DMDEVFS_REPORT_AUDIO    0x10u
 #define DMDEVFS_REPORT_ALL      (DMDEVFS_REPORT_MONITOR | DMDEVFS_REPORT_BLOCK | \
-                                 DMDEVFS_REPORT_DISPLAY | DMDEVFS_REPORT_INPUT)
+                                 DMDEVFS_REPORT_DISPLAY | DMDEVFS_REPORT_INPUT | \
+                                 DMDEVFS_REPORT_AUDIO)
 
 /**
  * @brief Configuration key limiting what a device's nodes are reported as
  *
- * "all" (default), "monitor", "block", "display", "input" or "none" - e.g.
+ * "all" (default), "monitor", "block", "display", "input", "audio" or "none" - e.g.
  * "none" for raw flash that must never be picked up by automount. Read from
  * the same place as friends_group (see configure_driver()); hot-plugged nodes
  * inherit it.
@@ -2935,6 +2937,10 @@ static uint8_t read_report_mask( dmini_context_t config_ctx, const char* section
     {
         return DMDEVFS_REPORT_INPUT;
     }
+    if (strcmp(value, DMDEVFS_CLASS_AUDIO) == 0)
+    {
+        return DMDEVFS_REPORT_AUDIO;
+    }
 
     DMOD_LOG_WARN("Unknown %s=%s for driver %s, reporting all classes\n", DMDEVFS_REPORT_KEY, value, driver_name);
     return DMDEVFS_REPORT_ALL;
@@ -2962,7 +2968,8 @@ static void build_report_name( const char* node_path, char* out, size_t out_size
  *
  * Opens the node read-only through its driver, issues
  * DMDRVI_IOCTL_MONITOR_GET_POLICY, DMDRVI_IOCTL_BLOCK_GET_INFO,
- * DMDRVI_IOCTL_GFX_GET_INFO and/or DMDRVI_IOCTL_INPUT_GET_INFO (only those
+ * DMDRVI_IOCTL_GFX_GET_INFO, DMDRVI_IOCTL_INPUT_GET_INFO and/or
+ * DMDRVI_IOCTL_AUDIO_GET_INFO (only those
  * allowed by @p wanted) and closes it again. A driver that cannot be opened,
  * or answers none of them, yields 0 - nothing is reported for it.
  *
@@ -3008,6 +3015,12 @@ static uint8_t probe_node_classes( driver_node_t* node, uint8_t wanted )
         dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_INPUT_GET_INFO, &input) == 0)
     {
         classes |= DMDEVFS_REPORT_INPUT;
+    }
+    dmdrvi_audio_info_t audio;
+    if ((wanted & DMDEVFS_REPORT_AUDIO) != 0 &&
+        dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_AUDIO_GET_INFO, &audio) == 0)
+    {
+        classes |= DMDEVFS_REPORT_AUDIO;
     }
 
     dmdrvi_close(node->driver_context, handle);
@@ -3085,6 +3098,10 @@ static void report_node_added( const char* abs_path, driver_node_t* node )
     {
         report_node_class(DMDEVFS_CLASS_INPUT, name, abs_path, true);
     }
+    if ((classes & DMDEVFS_REPORT_AUDIO) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_AUDIO, name, abs_path, true);
+    }
 }
 
 /**
@@ -3106,6 +3123,10 @@ static void report_node_removed( driver_node_t* node )
 
     path_t name;
     build_report_name(node->path, name, sizeof(name));
+    if ((classes & DMDEVFS_REPORT_AUDIO) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_AUDIO, name, NULL, false);
+    }
     if ((classes & DMDEVFS_REPORT_INPUT) != 0)
     {
         report_node_class(DMDEVFS_CLASS_INPUT, name, NULL, false);

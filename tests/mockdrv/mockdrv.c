@@ -11,9 +11,10 @@
  * Test driver for the libsystemd node reporting of dmdevfs.
  *
  * Configuration keys: `major` (device number), `monitor` ("true": the host
- * node implements the monitor contract), `display` / `input` ("true": the
- * host node answers DMDRVI_IOCTL_GFX_GET_INFO / DMDRVI_IOCTL_INPUT_GET_INFO,
- * as a display or an input device would). Its policy comes from
+ * node implements the monitor contract), `display` / `input` / `audio`
+ * ("true": the host node answers DMDRVI_IOCTL_GFX_GET_INFO /
+ * DMDRVI_IOCTL_INPUT_GET_INFO / DMDRVI_IOCTL_AUDIO_GET_INFO, as a display,
+ * an input device or an audio codec would). Its policy comes from
  * `event_handler`, `settle_ms` and `poll_interval_ms`; MONITOR_EVENT and
  * MONITOR_REFRESH calls are only counted (DMDEVFS_MOCKDRV_IOCTL_GET_STATS),
  * as are the opens of the host node and of its child.
@@ -37,6 +38,7 @@ struct dmdrvi_context
     bool        monitor;
     bool        display;
     bool        input;
+    bool        audio;
     bool        plugged;
     dmdrvi_monitor_policy_t     policy;
     volatile uint32_t           events;     /* MONITOR_EVENT calls */
@@ -215,6 +217,7 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, dmdrvi_context_t, _create,
     ctx->monitor = (strcmp(monitor, "true") == 0);
     ctx->display = (strcmp(dmini_get_string(config, NULL, "display", "false"), "true") == 0);
     ctx->input   = (strcmp(dmini_get_string(config, NULL, "input", "false"), "true") == 0);
+    ctx->audio   = (strcmp(dmini_get_string(config, NULL, "audio", "false"), "true") == 0);
     ctx->plugged = false;
     ctx->events = 0;
     ctx->refreshes = 0;
@@ -369,6 +372,16 @@ static int host_ioctl(dmdrvi_context_t context, int command, void* arg)
             ((dmdrvi_input_info_t*)arg)->type = DMDRVI_INPUT_TYPE_TOUCHSCREEN;
             ((dmdrvi_input_info_t*)arg)->width = 480;
             ((dmdrvi_input_info_t*)arg)->height = 272;
+            return 0;
+        case DMDRVI_IOCTL_AUDIO_GET_INFO:
+            if (!context->audio || arg == NULL)
+            {
+                return -ENOTTY;
+            }
+            memset(arg, 0, sizeof(dmdrvi_audio_info_t));
+            ((dmdrvi_audio_info_t*)arg)->config.sample_rate_hz = 48000;
+            ((dmdrvi_audio_info_t*)arg)->config.channels = 2;
+            ((dmdrvi_audio_info_t*)arg)->config.sample_bits = 16;
             return 0;
         case DMDEVFS_MOCKDRV_IOCTL_SET_MEDIA:
             if (context->plugged || arg == NULL)
