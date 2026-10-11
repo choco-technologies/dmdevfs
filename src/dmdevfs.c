@@ -145,8 +145,9 @@ typedef struct
 
 typedef struct
 {
-    driver_node_t* driver;   // Last driver
-    char* directory_path;   // Directory path
+    driver_node_t* driver;       // Last driver
+    char* directory_path;        // Directory path
+    dmlist_context_t* seen_dirs; // Already-emitted directory names (dedup)
 } directory_node_t;
 
 /**
@@ -1117,10 +1118,17 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _opendir, (dmfsi_context_t ct
     }
     dir_node->driver = get_next_driver_node(ctx, NULL, path);
     dir_node->directory_path = Dmod_StrDup(path);
-    
+    dir_node->seen_dirs = dmlist_create();
+    if (dir_node->directory_path == NULL || dir_node->seen_dirs == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate directory node resources\n");
+        Dmod_Free(dir_node->directory_path);
+        dmlist_destroy(dir_node->seen_dirs);
+        Dmod_Free(dir_node);
+        return DMFSI_ERR_GENERAL;
+    }
+
     *dp = dir_node;
-
-
     return DMFSI_OK;
 }
 
@@ -1140,74 +1148,61 @@ dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, int, _readdir, (dmfsi_context_t ct
     {
         return DMFSI_ERR_NOT_FOUND; // No more entries
     }
-    driver_node_t* driver = dir_node->driver;
 
-    path_t parent_dir;
-    if (read_driver_parent_directory(dir_node->driver, parent_dir, sizeof(parent_dir)) != 0)
-    {
-        DMOD_LOG_ERROR("Failed to read parent directory for driver\n");
-        return DMFSI_ERR_GENERAL;
-    }
+    for (;;) {
+        driver_node_t* driver = dir_node->driver;
 
-    bool file_should_be_listed = compare_paths_ignore_trailing_slash(dir_node->directory_path, parent_dir) == 0;
-    if(file_should_be_listed)
-    {
-        // Extract basename from the full path for the directory entry
-        read_base_name(driver->path, entry->name, sizeof(entry->name));
-        
-        dmdrvi_stat_t stat = {0};
-        int res = driver_stat(driver, driver->path, &stat);
-        if (res != 0)
+        path_t parent_dir;
+        if (read_driver_parent_directory(driver, parent_dir, sizeof(parent_dir)) != 0)
         {
-            DMOD_LOG_ERROR("Failed to get file stats for: %s\n", driver->path);
+            DMOD_LOG_ERROR("Failed to read parent directory for driver\n");
             return DMFSI_ERR_GENERAL;
         }
 
-        entry->size = stat.size;
-        entry->attr = stat.mode & ~DMFSI_ATTR_DIRECTORY;
-    }
-    else 
-    {
-        // Extract the immediate subdirectory name relative to the listing directory.
-        // E.g. listing "/" with a driver whose parent is "dmgpio8/" yields "dmgpio8".
-        read_next_subdir_name(dir_node->directory_path, parent_dir, entry->name, sizeof(entry->name));
-        entry->size = 0;
-        entry->attr = DMFSI_ATTR_DIRECTORY;
-    }
+        bool file_should_be_listed = compare_paths_ignore_trailing_slash(dir_node->directory_path, parent_dir) == 0;
 
-    // Move to next driver for subsequent call.
-    // When this entry is a directory, skip subsequent drivers that would emit
-    // the same immediate subdirectory name to avoid duplicate directory entries.
-    driver_node_t* next_driver = get_next_driver_node(ctx, driver, dir_node->directory_path);
-    if (!file_should_be_listed)
-    {
-        while (next_driver != NULL)
+        if (file_should_be_listed)
         {
-            path_t next_parent_dir;
-            if (read_driver_parent_directory(next_driver, next_parent_dir, sizeof(next_parent_dir)) != 0)
+            read_base_name(driver->path, entry->name, sizeof(entry->name));
+
+            dmdrvi_stat_t stat = {0};
+            int res = driver_stat(driver, driver->path, &stat);
+            if (res != 0)
             {
-                DMOD_LOG_ERROR("Failed to read parent directory for next driver\n");
+                DMOD_LOG_ERROR("Failed to get file stats for: %s\n", driver->path);
                 return DMFSI_ERR_GENERAL;
             }
 
-            bool next_is_file_in_listed_dir = compare_paths_ignore_trailing_slash(dir_node->directory_path, next_parent_dir) == 0;
-            if (next_is_file_in_listed_dir)
-            {
-                break;
-            }
-
-            path_t next_subdir_name;
-            read_next_subdir_name(dir_node->directory_path, next_parent_dir, next_subdir_name, sizeof(next_subdir_name));
-            if (strcmp(next_subdir_name, entry->name) != 0)
-            {
-                break;
-            }
-
-            next_driver = get_next_driver_node(ctx, next_driver, dir_node->directory_path);
+            entry->size = stat.size;
+            entry->attr = stat.mode & ~DMFSI_ATTR_DIRECTORY;
         }
+        else
+        {
+            path_t subdir_name;
+            read_next_subdir_name(dir_node->directory_path, parent_dir, subdir_name, sizeof(subdir_name));
+
+            // Skip directories that were already emitted (non-consecutive dedup)
+            if (dmlist_find(dir_node->seen_dirs, subdir_name, (dmlist_compare_func_t)strcmp) != NULL)
+            {
+                dir_node->driver = get_next_driver_node(ctx, driver, dir_node->directory_path);
+                continue;
+            }
+
+            char* dup = Dmod_StrDup(subdir_name);
+            if (dup != NULL)
+            {
+                dmlist_push_back(dir_node->seen_dirs, dup);
+            }
+
+            strncpy(entry->name, subdir_name, sizeof(entry->name));
+            entry->name[sizeof(entry->name) - 1] = '\0';
+            entry->size = 0;
+            entry->attr = DMFSI_ATTR_DIRECTORY;
+        }
+
+        dir_node->driver = get_next_driver_node(ctx, driver, dir_node->directory_path);
+        return DMFSI_OK;
     }
-    dir_node->driver = next_driver;
-    return DMFSI_OK;
 }
 
 /**
@@ -1223,6 +1218,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _closedir, (dmfsi_context_t c
     
     directory_node_t* dir_node = (directory_node_t*)dp;
     Dmod_Free(dir_node->directory_path);
+    size_t count = dmlist_size(dir_node->seen_dirs);
+    for (size_t i = 0; i < count; i++)
+    {
+        Dmod_Free(dmlist_get(dir_node->seen_dirs, i));
+    }
+    dmlist_destroy(dir_node->seen_dirs);
     Dmod_Free(dir_node);
     return DMFSI_OK;
 }
