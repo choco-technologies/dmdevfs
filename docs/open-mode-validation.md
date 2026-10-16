@@ -52,3 +52,13 @@ Validation on 2026-10-16:
 - The regression fails against the exact pre-fix dmdevfs source: driver free
   and unmount complete prematurely (0/1 steps, exit 1).
 - STM32F7 build passed.
+
+## RTC device reporting
+
+RTC nodes are probed with GET_INFO, not GET_TIME, so an unset calendar is still
+reported to libsystemd. The new rtc report mask participates in the existing
+all/none/single-class filtering and device removal notifies the matching rule.
+Native ctest passes 10/10 targets, including 11/11 node-reporting steps covering
+RTC startup, unset calendars, report filtering and service stop on unmount.
+STM32F7 compilation passed; the integrated board image starts dmutc@rtc as a
+library unit through the class=rtc rule.

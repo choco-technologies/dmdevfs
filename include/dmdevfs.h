@@ -30,7 +30,9 @@ extern "C" {
  *  - "input":   DMDRVI_IOCTL_INPUT_GET_INFO - an input device (touch panel,
  *    mouse, buttons);
  *  - "audio":   DMDRVI_IOCTL_AUDIO_GET_INFO - an audio codec or other audio
- *    device, e.g. for a player or mixer service.
+ *    device, e.g. for a player or mixer service;
+ *  - "rtc": DMDRVI_IOCTL_RTC_GET_INFO - an RTC, including unset calendars,
+ *    e.g. for the dmutc library service.
  *
  * The device name is the node path relative to the mount with '/' replaced
  * by '_' (unit names cannot contain '/'): "/dmsdio0/0" -> "dmsdio0_0". The
@@ -46,6 +48,7 @@ extern "C" {
 #define DMDEVFS_CLASS_DISPLAY   "display"
 #define DMDEVFS_CLASS_INPUT     "input"
 #define DMDEVFS_CLASS_AUDIO     "audio"
+#define DMDEVFS_CLASS_RTC       "rtc"
 
 #ifdef __cplusplus
 }
