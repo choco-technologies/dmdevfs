@@ -174,6 +174,13 @@ dmod_link_modules(${DMOD_MODULE_NAME}
 )
 dmdevfs_register_test(${DMOD_MODULE_NAME})
 
+# Mount teardown while asynchronous node probing is in flight.
+set(DMOD_MODULE_NAME test_mount_lifetime)
+dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION} test_mount_lifetime.c)
+target_include_directories(${DMOD_MODULE_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv)
+dmod_link_modules(${DMOD_MODULE_NAME} dmfsi dmosi)
+dmdevfs_register_test(${DMOD_MODULE_NAME})
+
 # Print information about tests
 message(STATUS "DMDEVFS tests configured")
 message(STATUS "  Module output directory: ${CMAKE_BINARY_DIR}/dmf")

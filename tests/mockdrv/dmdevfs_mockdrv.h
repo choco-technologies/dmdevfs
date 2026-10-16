@@ -20,6 +20,14 @@
 #include <stdint.h>
 
 /** Monitor contract calls a monitored host node received so far, and opens of its nodes. */
+#define DMDEVFS_MOCKDRV_IOCTL_PROBE_GATE 0x1006
+/* Test-owned semaphore handles; remain alive until the driver is freed. */
+typedef struct {
+    void* entered;
+    void* release;
+    void* freed;
+} dmdevfs_mockdrv_probe_gate_t;
+
 typedef struct
 {
     uint32_t    events;         /**< DMDRVI_IOCTL_MONITOR_EVENT */

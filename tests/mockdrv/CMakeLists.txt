@@ -21,4 +21,5 @@ dmod_link_modules(${DMOD_MODULE_NAME}
     dmdrvi
     dmini
     dmlist
+    dmosi
 )

@@ -3,6 +3,7 @@
 #include "dmdrvi.h"
 #include "dmini.h"
 #include "dmlist.h"
+#include "dmosi.h"
 #include "dmdevfs_mockdrv.h"
 #include <errno.h>
 #include <string.h>
@@ -33,6 +34,7 @@
 
 struct dmdrvi_context
 {
+    dmdevfs_mockdrv_probe_gate_t probe_gate;
     uint32_t    magic;
     uint8_t     major;
     bool        monitor;
@@ -213,6 +215,7 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, dmdrvi_context_t, _create,
         return NULL;
     }
     const char* monitor = dmini_get_string(config, NULL, "monitor", "false");
+    memset(&ctx->probe_gate, 0, sizeof(ctx->probe_gate));
     ctx->magic   = MOCKDRV_CONTEXT_MAGIC;
     ctx->major   = (uint8_t)dmini_get_int(config, NULL, "major", 0);
     ctx->monitor = (strcmp(monitor, "true") == 0);
@@ -243,6 +246,8 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, void, _free, ( dmdrvi_cont
 {
     if (is_valid(context))
     {
+        if (context->probe_gate.freed != NULL)
+            dmosi_semaphore_post(context->probe_gate.freed, 1);
         clear_medium(context);
         dmlist_destroy(context->sectors);
         context->magic = 0;
@@ -350,6 +355,19 @@ static int monitor_ioctl(dmdrvi_context_t context, int command, void* arg)
 
 static int host_ioctl(dmdrvi_context_t context, int command, void* arg)
 {
+    if (command == DMDEVFS_MOCKDRV_IOCTL_PROBE_GATE) {
+        if (arg == NULL) return -EINVAL;
+        context->probe_gate = *(const dmdevfs_mockdrv_probe_gate_t*)arg;
+        return 0;
+    }
+    if (command == DMDRVI_IOCTL_MONITOR_GET_POLICY && context->probe_gate.entered != NULL) {
+        void* entered = context->probe_gate.entered;
+        void* release = context->probe_gate.release;
+        context->probe_gate.entered = NULL;
+        dmosi_semaphore_post(entered, 1);
+        int rc = dmosi_semaphore_wait(release, 1, 5000);
+        if (rc != 0) return rc;
+    }
     switch (command)
     {
         case DMDRVI_IOCTL_MONITOR_GET_POLICY:

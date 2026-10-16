@@ -171,6 +171,7 @@ typedef struct
     dmdrvi_context_t context;
     dmdrvi_dev_num_t dev_num;
     bool available;   // true: device became available, false: no longer available
+    uint64_t mount_generation; // Reject queued notifications for a reused mount address.
     dmfsi_context_t mounted;    // Not NULL: report the nodes of this mount instead (see dmfsi_dmdevfs_mounted())
 } hotplug_event_t;
 
@@ -242,6 +243,10 @@ struct dmfsi_context
     uint32_t    magic;
     char* config_path;          // Path with the configuration files
     dmlist_context_t* drivers;  // List of loaded drivers
+    uint64_t generation;
+    unsigned worker_refs;        // Active unlocked worker operations; guarded by g_devfs_mutex.
+    bool stopping;
+    dmosi_semaphore_t workers_idle;
     bool ready;                 // True once dmfsi_dmdevfs_mounted() has been called by the mounter
     path_t mount_path;          // This mount's own absolute path, valid once `ready` is true
 };
@@ -255,6 +260,7 @@ struct dmfsi_context
  * the right mount (and driver_node_t) to update.
  */
 static dmlist_context_t* g_dmdevfs_mounts = NULL;
+static uint64_t g_mount_generation;
 
 /**
  * @brief Guards g_dmdevfs_mounts and every mount's ctx->drivers list against
@@ -353,7 +359,7 @@ static void hotplug_worker_thread( void* arg );
 static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num, bool available );
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
-static void process_mount_ready( dmfsi_context_t mount );
+static void process_mount_ready( dmfsi_context_t mount, uint64_t generation );
 
 // ============================================================================
 //                      Module Interface Implementation
@@ -454,6 +460,39 @@ int dmod_deinit(void)
 //                      DMFSI Interface Implementation
 // ============================================================================
 
+/* Retain under g_devfs_mutex after a registry lookup, before invoking driver
+ * code without that mutex. Unmount removes the registry entry first and waits
+ * for the last active worker to finish before freeing any driver or list. */
+static void retain_worker_mount_locked(dmfsi_context_t mount)
+{
+    ++mount->worker_refs;
+}
+
+static void release_worker_mount(dmfsi_context_t mount)
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    if (--mount->worker_refs == 0 && mount->stopping)
+    {
+        // Post before dropping the lock: unmount may destroy the semaphore
+        // as soon as its wait completes. Do not access mount after this post.
+        dmosi_semaphore_post(mount->workers_idle, 1);
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+}
+
+static void detach_mount_and_wait(dmfsi_context_t mount)
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    dmlist_remove(g_dmdevfs_mounts, mount, compare_mount_context);
+    mount->stopping = true;
+    bool busy = mount->worker_refs != 0;
+    dmosi_mutex_unlock(g_devfs_mutex);
+    if (busy)
+    {
+        dmosi_semaphore_wait(mount->workers_idle, 1, -1);
+    }
+}
+
 /**
  * @brief Initialize the file system
  */
@@ -481,6 +520,17 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     ctx->magic = DMDEVFS_CONTEXT_MAGIC;
     ctx->config_path = Dmod_StrDup(config);
     ctx->drivers = dmlist_create();
+    ctx->worker_refs = 0;
+    ctx->stopping = false;
+    ctx->workers_idle = dmosi_semaphore_create(0, 1);
+    if (ctx->config_path == NULL || ctx->drivers == NULL || ctx->workers_idle == NULL)
+    {
+        if (ctx->workers_idle != NULL) dmosi_semaphore_destroy(ctx->workers_idle);
+        if (ctx->drivers != NULL) dmlist_destroy(ctx->drivers);
+        Dmod_Free(ctx->config_path);
+        Dmod_Free(ctx);
+        return NULL;
+    }
     ctx->ready = false;
     ctx->mount_path[0] = '\0';
 
@@ -497,26 +547,21 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     // mount even while a driver's own dmdrvi_create() is still running as
     // part of configure_drivers() below.
     dmosi_mutex_lock(g_devfs_mutex);
-    bool registered = dmlist_push_back(g_dmdevfs_mounts, ctx);
+    ctx->generation = g_mount_generation == UINT64_MAX ? 0 : ++g_mount_generation;
+    bool registered = ctx->generation != 0 && dmlist_push_back(g_dmdevfs_mounts, ctx);
     dmosi_mutex_unlock(g_devfs_mutex);
     if (!registered)
     {
         DMOD_LOG_ERROR("Failed to register mount for hot-plug notifications\n");
     }
 
-    int res = configure_drivers(ctx, NULL, ctx->config_path);
+    int res = registered ? configure_drivers(ctx, NULL, ctx->config_path) : DMFSI_ERR_GENERAL;
     if (res != DMFSI_OK)
     {
         DMOD_LOG_ERROR("Failed to configure drivers\n");
+        detach_mount_and_wait(ctx);
         unconfigure_drivers(ctx);
-
-        if (registered)
-        {
-            dmosi_mutex_lock(g_devfs_mutex);
-            dmlist_remove(g_dmdevfs_mounts, ctx, compare_mount_context);
-            dmosi_mutex_unlock(g_devfs_mutex);
-        }
-
+        dmosi_semaphore_destroy(ctx->workers_idle);
         dmlist_destroy(ctx->drivers);
         Dmod_Free(ctx->config_path);
         Dmod_Free(ctx);
@@ -545,14 +590,9 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _deinit, (dmfsi_context_t ctx
         return DMFSI_ERR_INVALID;
     }
 
-    // Deregister before tearing down ctx->drivers: once removed, the hot-plug
-    // worker thread can no longer find (or touch) this mount, so the rest of
-    // teardown below can safely run without holding g_devfs_mutex.
-    dmosi_mutex_lock(g_devfs_mutex);
-    dmlist_remove(g_dmdevfs_mounts, ctx, compare_mount_context);
-    dmosi_mutex_unlock(g_devfs_mutex);
-
+    detach_mount_and_wait(ctx);
     unconfigure_drivers(ctx);
+    dmosi_semaphore_destroy(ctx->workers_idle);
     dmlist_destroy(ctx->drivers);
     Dmod_Free(ctx->config_path);
     Dmod_Free(ctx);
@@ -3788,6 +3828,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, void, _mounted, (dmfsi_context_t c
     }
     memset(event, 0, sizeof(*event));
     event->mounted = ctx;
+    event->mount_generation = ctx->generation;
     dmosi_mutex_lock(g_hotplug_mutex);
     bool queued = dmlist_push_back(g_hotplug_events, event);
     dmosi_mutex_unlock(g_hotplug_mutex);
@@ -3809,13 +3850,16 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, void, _mounted, (dmfsi_context_t c
  * may need (report_node_ready()). A node reported meanwhile (a hot-plug
  * event queued earlier) is left alone, its partitions too.
  */
-static void process_mount_ready( dmfsi_context_t mount )
+static void process_mount_ready( dmfsi_context_t mount, uint64_t generation )
 {
     dmosi_mutex_lock(g_devfs_mutex);
     bool live = dmlist_find(g_dmdevfs_mounts, mount, compare_mount_context) != NULL;
+    // A stale queued pointer may equal the address of a later mount.
+    live = live && mount->generation == generation;
     path_t mount_path;
     if (live)
     {
+        retain_worker_mount_locked(mount);
         strncpy(mount_path, mount->mount_path, sizeof(mount_path));
         mount_path[sizeof(mount_path) - 1] = '\0';
     }
@@ -3841,6 +3885,7 @@ static void process_mount_ready( dmfsi_context_t mount )
         report_node_ready(mount_path, node);
         scan_partitions(mount, mount_path, node);
     }
+    release_worker_mount(mount);
 }
 
 /**
@@ -3873,7 +3918,7 @@ static void hotplug_worker_thread( void* arg )
         }
         if (event->mounted != NULL)
         {
-            process_mount_ready(event->mounted);
+            process_mount_ready(event->mounted, event->mount_generation);
             Dmod_Free(event);
             continue;
         }
@@ -3907,9 +3952,9 @@ static void hotplug_worker_thread( void* arg )
  *     (stable, pointer-only) fields needed to build the new node.
  *  2. Unlocked: allocate the node and compute its path (may log).
  *  3. Locked again: re-validate the mount is still registered - if _deinit()
- *     raced us and won, mount may now be a dangling pointer, so this check
- *     must only ever compare it (never dereference it) until proven live -
- *     and only then insert the node.
+ *     started unmounting, discard the new node instead. A worker reference
+ *     keeps the owner, driver module and mount alive across all unlocked
+ *     work until release_worker_mount(), including error exits.
  */
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num )
 {
@@ -3931,6 +3976,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
         return;
     }
 
+    retain_worker_mount_locked(mount);
     driver_node_t* owner = (driver_node_t*)dmlist_find(mount->drivers, (void*)context, compare_driver_context);
     dmdrvi_context_t owner_context = owner->driver_context;
     Dmod_Context_t* owner_driver = owner->driver;
@@ -3947,6 +3993,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
         DMOD_LOG_ERROR("dmdrvi_device_available: failed to retain friends metadata\n");
         if (owner_role != NULL) Dmod_Free(owner_role);
         if (owner_group != NULL) Dmod_Free(owner_group);
+        release_worker_mount(mount);
         return;
     }
 
@@ -3956,6 +4003,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
         DMOD_LOG_ERROR("dmdrvi_device_available: failed to allocate device node\n");
         if (owner_role != NULL) Dmod_Free(owner_role);
         if (owner_group != NULL) Dmod_Free(owner_group);
+        release_worker_mount(mount);
         return;
     }
 
@@ -3981,6 +4029,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     {
         DMOD_LOG_ERROR("dmdrvi_device_available: failed to compute device path\n");
         free_driver_node(new_node);
+        release_worker_mount(mount);
         return;
     }
 
@@ -4002,12 +4051,14 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     {
         DMOD_LOG_ERROR("dmdrvi_device_available: mount was unmounted while processing event\n");
         free_driver_node(new_node);
+        release_worker_mount(mount);
         return;
     }
     if (!inserted)
     {
         DMOD_LOG_ERROR("dmdrvi_device_available: failed to register device node\n");
         free_driver_node(new_node);
+        release_worker_mount(mount);
         return;
     }
 
@@ -4023,6 +4074,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     }
 
     DMOD_LOG_INFO("Hot-plugged device now available: %s\n", new_node->path);
+    release_worker_mount(mount);
 }
 
 /**
@@ -4044,6 +4096,7 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
         return;
     }
 
+    retain_worker_mount_locked(mount);
     driver_node_t* node = (driver_node_t*)dmlist_find(mount->drivers, &lookup, compare_dynamic_device);
     path_t removed_path;
     strncpy(removed_path, node->path, sizeof(removed_path));
@@ -4074,4 +4127,5 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
 
     release_driver_node_ref(node);
     DMOD_LOG_INFO("Hot-plugged device no longer available: %s\n", removed_path);
+    release_worker_mount(mount);
 }
