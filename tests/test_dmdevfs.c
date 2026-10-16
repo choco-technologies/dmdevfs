@@ -6,7 +6,7 @@
 #include "dmhaman.h"
 #include "libsystemd.h"
 #include "dmdevfs_mockdrv.h"
-#include "dmdrvi_ioctl.h"
+#include "dmdrvi.h"
 #include <string.h>
 #include <errno.h>
 
@@ -325,4 +325,27 @@ DMOD_TEST_STEP(dmdevfs_reports_removal_of_plugged_node_on_teardown)
     g_mount = NULL;
     DMOD_TEST_EXPECT_TRUE(wait_state("blk@dmdevfs_mockdrv2_0", DMOSI_PROCESS_STATE_TERMINATED));
     DMOD_TEST_EXPECT_TRUE(wait_state("mon@dmdevfs_mockdrv0", DMOSI_PROCESS_STATE_TERMINATED));
+}
+
+DMOD_TEST_STEP(device_access_modes_are_translated_at_the_filesystem_boundary)
+{
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+    if (g_mount == NULL) return;
+    const int modes[] = {DMFSI_O_RDONLY, DMFSI_O_WRONLY, DMFSI_O_RDWR,
+        DMFSI_O_WRONLY | DMFSI_O_CREAT | DMFSI_O_TRUNC, DMFSI_O_RDWR | DMFSI_O_APPEND};
+    const int expected[] = {DMDRVI_O_RDONLY, DMDRVI_O_WRONLY, DMDRVI_O_RDWR,
+        DMDRVI_O_WRONLY | DMFSI_O_CREAT | DMFSI_O_TRUNC, DMDRVI_O_RDWR | DMFSI_O_APPEND};
+    for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i) {
+        void* file = NULL; uint32_t flags = 0;
+        DMOD_TEST_EXPECT_EQ(g_fs.fopen(g_mount, &file, "/dmdevfs_mockdrv2", modes[i], 0), DMFSI_OK);
+        DMOD_TEST_EXPECT_NOT_NULL(file);
+        if (file != NULL) {
+            DMOD_TEST_EXPECT_EQ(g_fs.ioctl(g_mount, file, DMDEVFS_MOCKDRV_IOCTL_GET_OPEN_FLAGS, &flags), 0);
+            DMOD_TEST_EXPECT_EQ(flags, (uint32_t)expected[i]);
+            DMOD_TEST_EXPECT_EQ(g_fs.fclose(g_mount, file), DMFSI_OK);
+        }
+    }
+    void* invalid = (void*)1;
+    DMOD_TEST_EXPECT_EQ(g_fs.fopen(g_mount, &invalid, "/dmdevfs_mockdrv2", 0, 0), DMFSI_ERR_INVALID);
+    DMOD_TEST_EXPECT_NULL(invalid);
 }

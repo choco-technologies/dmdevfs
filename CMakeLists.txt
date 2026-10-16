@@ -91,7 +91,7 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
 # for them.
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
-    dmdrvi@>=2.6
+    dmdrvi
     dmini
     dmlist
     dmosi

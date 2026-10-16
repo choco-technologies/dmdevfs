@@ -54,6 +54,7 @@ typedef struct
 {
     uint32_t    magic;
     bool        is_child;
+    uint32_t    open_flags;
 } mockdrv_handle_t;
 
 /* Contexts created so far - only ever grows, so create_seq orders them. */
@@ -263,6 +264,7 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, void*, _open,
     {
         handle->magic = MOCKDRV_HANDLE_MAGIC;
         handle->is_child = is_child;
+        handle->open_flags = (uint32_t)flags;
         if (is_child)
         {
             context->child_opens++;
@@ -429,6 +431,11 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, int, _ioctl,
     if (!is_valid(context) || h == NULL || h->magic != MOCKDRV_HANDLE_MAGIC)
     {
         return -EINVAL;
+    }
+    if (command == DMDEVFS_MOCKDRV_IOCTL_GET_OPEN_FLAGS) {
+        if (arg == NULL) return -EINVAL;
+        *(uint32_t*)arg = h->open_flags;
+        return 0;
     }
     if (!h->is_child)
     {

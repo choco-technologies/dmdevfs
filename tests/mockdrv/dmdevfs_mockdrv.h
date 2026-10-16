@@ -12,6 +12,8 @@
 #define DMDEVFS_MOCKDRV_IOCTL_SET_MEDIA 0x1003  /* arg: const uint64_t* block count - only while unplugged; clears the medium */
 #define DMDEVFS_MOCKDRV_IOCTL_WRITE_SECTOR 0x1004 /* arg: const dmdevfs_mockdrv_sector_t* - raw write, plugged or not */
 
+#define DMDEVFS_MOCKDRV_IOCTL_GET_OPEN_FLAGS 0x1005 /* arg: uint32_t* - exact flags passed to this handle */
+
 /** Logical block size of the child's medium. */
 #define DMDEVFS_MOCKDRV_BLOCK_SIZE      512u
 

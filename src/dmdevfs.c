@@ -559,6 +559,22 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _deinit, (dmfsi_context_t ctx
     return DMFSI_OK;
 }
 
+/* dmfsi encodes RDWR as RDONLY|WRONLY (3), while dmdrvi has a
+ * separate RDWR bit (4). Translate at this interface boundary, retaining
+ * the non-access flags that were already forwarded to drivers. */
+static int driver_open_mode(int mode)
+{
+    int access = mode & (DMFSI_O_RDONLY | DMFSI_O_WRONLY);
+    int extra = mode & ~(DMFSI_O_RDONLY | DMFSI_O_WRONLY);
+    switch (access)
+    {
+        case DMFSI_O_RDONLY: return extra | DMDRVI_O_RDONLY;
+        case DMFSI_O_WRONLY: return extra | DMDRVI_O_WRONLY;
+        case DMFSI_O_RDWR: return extra | DMDRVI_O_RDWR;
+        default: return -1;
+    }
+}
+
 /**
  * @brief Open a file
  */
@@ -576,6 +592,10 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         return DMFSI_ERR_INVALID;
     }
     
+    *fp = NULL;
+    int driver_mode = driver_open_mode(mode);
+    if (driver_mode < 0) return DMFSI_ERR_INVALID;
+
     // Find the driver node for this file, taking a reference on it so it
     // cannot be freed out from under this handle by a concurrent
     // process_device_unavailable() - see find_and_ref_driver_node().
@@ -616,7 +636,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
 
         // Open the device through the driver, identifying which device within the
         // context this is (the context's own device, or a hot-plugged sub-device)
-        handle->driver_handle = dmdrvi_open(driver_node->driver_context, mode, &driver_node->dev_num);
+        handle->driver_handle = dmdrvi_open(driver_node->driver_context, driver_mode, &driver_node->dev_num);
         if(handle->driver_handle == NULL)
         {
             DMOD_LOG_ERROR("Driver failed to open device: %s\n", path);
