@@ -53,9 +53,10 @@
 #define DMDEVFS_REPORT_DISPLAY  0x04u
 #define DMDEVFS_REPORT_INPUT    0x08u
 #define DMDEVFS_REPORT_AUDIO    0x10u
+#define DMDEVFS_REPORT_RTC      0x20u
 #define DMDEVFS_REPORT_ALL      (DMDEVFS_REPORT_MONITOR | DMDEVFS_REPORT_BLOCK | \
                                  DMDEVFS_REPORT_DISPLAY | DMDEVFS_REPORT_INPUT | \
-                                 DMDEVFS_REPORT_AUDIO)
+                                 DMDEVFS_REPORT_AUDIO | DMDEVFS_REPORT_RTC)
 
 /**
  * @brief Configuration key limiting what a device's nodes are reported as
@@ -3042,6 +3043,10 @@ static uint8_t read_report_mask( dmini_context_t config_ctx, const char* section
     {
         return DMDEVFS_REPORT_AUDIO;
     }
+    if (strcmp(value, DMDEVFS_CLASS_RTC) == 0)
+    {
+        return DMDEVFS_REPORT_RTC;
+    }
 
     DMOD_LOG_WARN("Unknown %s=%s for driver %s, reporting all classes\n", DMDEVFS_REPORT_KEY, value, driver_name);
     return DMDEVFS_REPORT_ALL;
@@ -3124,6 +3129,14 @@ static uint8_t probe_node_classes( driver_node_t* node, uint8_t wanted )
         classes |= DMDEVFS_REPORT_AUDIO;
     }
 
+    // GET_INFO works even on an unset clock: the UTC service must still bind.
+    dmdrvi_rtc_info_t rtc;
+    if ((wanted & DMDEVFS_REPORT_RTC) != 0 &&
+        dmdrvi_ioctl(node->driver_context, handle, DMDRVI_IOCTL_RTC_GET_INFO, &rtc) == 0)
+    {
+        classes |= DMDEVFS_REPORT_RTC;
+    }
+
     dmdrvi_close(node->driver_context, handle);
     return classes;
 }
@@ -3203,6 +3216,10 @@ static void report_node_added( const char* abs_path, driver_node_t* node )
     {
         report_node_class(DMDEVFS_CLASS_AUDIO, name, abs_path, true);
     }
+    if ((classes & DMDEVFS_REPORT_RTC) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_RTC, name, abs_path, true);
+    }
 }
 
 /**
@@ -3224,6 +3241,10 @@ static void report_node_removed( driver_node_t* node )
 
     path_t name;
     build_report_name(node->path, name, sizeof(name));
+    if ((classes & DMDEVFS_REPORT_RTC) != 0)
+    {
+        report_node_class(DMDEVFS_CLASS_RTC, name, NULL, false);
+    }
     if ((classes & DMDEVFS_REPORT_AUDIO) != 0)
     {
         report_node_class(DMDEVFS_CLASS_AUDIO, name, NULL, false);

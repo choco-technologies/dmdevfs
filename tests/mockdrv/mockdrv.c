@@ -41,6 +41,7 @@ struct dmdrvi_context
     bool        display;
     bool        input;
     bool        audio;
+    bool        rtc;
     bool        plugged;
     dmdrvi_monitor_policy_t     policy;
     volatile uint32_t           events;     /* MONITOR_EVENT calls */
@@ -222,6 +223,7 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, dmdrvi_context_t, _create,
     ctx->display = (strcmp(dmini_get_string(config, NULL, "display", "false"), "true") == 0);
     ctx->input   = (strcmp(dmini_get_string(config, NULL, "input", "false"), "true") == 0);
     ctx->audio   = (strcmp(dmini_get_string(config, NULL, "audio", "false"), "true") == 0);
+    ctx->rtc = (strcmp(dmini_get_string(config, NULL, "rtc", "false"), "true") == 0);
     ctx->plugged = false;
     ctx->events = 0;
     ctx->refreshes = 0;
@@ -393,6 +395,16 @@ static int host_ioctl(dmdrvi_context_t context, int command, void* arg)
             ((dmdrvi_input_info_t*)arg)->width = 480;
             ((dmdrvi_input_info_t*)arg)->height = 272;
             return 0;
+        case DMDRVI_IOCTL_RTC_GET_INFO:
+            if (!context->rtc || arg == NULL) return -ENOTTY;
+            *(dmdrvi_rtc_info_t*)arg = (dmdrvi_rtc_info_t){1000000000u, 0, 2000, 2099, 0};
+            return 0;
+        case DMDRVI_IOCTL_RTC_GET_STATUS:
+            if (!context->rtc || arg == NULL) return -ENOTTY;
+            *(dmdrvi_rtc_status_t*)arg = (dmdrvi_rtc_status_t){DMDRVI_RTC_STATUS_RUNNING, 0};
+            return 0;
+        case DMDRVI_IOCTL_RTC_GET_TIME:
+            return context->rtc ? -ENODATA : -ENOTTY;
         case DMDRVI_IOCTL_AUDIO_GET_INFO:
             if (!context->audio || arg == NULL)
             {

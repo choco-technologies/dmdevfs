@@ -12,7 +12,7 @@ DMOD Driver File System - A driver-based file system module for embedded systems
 - **DMFSI Compatible**: Implements the standard DMOD file system interface
 - **DMVFS Integration**: Can be mounted as a file system in DMVFS
 - **Modular Design**: Built on DMOD framework for easy integration
-- **libsystemd Device Reporting**: Reports monitored, block, display, input and audio device nodes to libsystemd, so device rules can start services for them (see [libsystemd Device Reporting](#libsystemd-device-reporting))
+- **libsystemd Device Reporting**: Reports monitored, block, display, input, audio and RTC device nodes to libsystemd, so device rules can start services for them (see [libsystemd Device Reporting](#libsystemd-device-reporting))
 - **Partition Nodes**: Exposes the MBR (incl. extended/logical) and GPT partitions of block devices as their own nodes (`<node>p<N>`), with offsets translated by DMDEVFS (see [Partition Nodes](#partition-nodes))
 - **dmdevmon Service**: Generic monitor service that drives every node implementing the dmdrvi monitor contract - presence detection, hot-plug and polling without driver threads (see [services/dmdevmon](services/dmdevmon/README.md))
 
@@ -151,7 +151,7 @@ parameter2 = value2
 - **`driver_order`**: An integer that controls when the driver is configured relative to other drivers. All drivers with `driver_order = 0` (the default when the field is omitted) are configured before any driver with `driver_order = 1`, which in turn is configured before `driver_order = 2`, and so on. Use this to force a driver to be configured after another one when there is no dmod dependency between them to infer the order from automatically. Negative values are allowed and are configured before the default group: `driver_order = -1` runs before `0`, and `-2` before `-1`. Use a negative value to put a driver ahead of everything left at the default, without having to raise `driver_order` in every other configuration file.
 - **`friends_group`**: Groups configurations that form one logical peripheral. Once device paths are available, DMDEVFS reports every other member of the group through the optional driver's `dmdrvi_friend_changed()` callback.
 - **`friend_role`**: Optional application-defined role of this member inside its friends group, such as `chip_select`. It lets consumers distinguish several devices of the same type without relying on section names or generated paths.
-- **`report`**: What this device's nodes may be reported to libsystemd as: `all` (default), `monitor`, `block`, `display`, `input`, `audio` or `none`. Hot-plugged nodes inherit it. See [libsystemd Device Reporting](#libsystemd-device-reporting).
+- **`report`**: What this device's nodes may be reported to libsystemd as: `all` (default), `monitor`, `block`, `display`, `input`, `audio`, `rtc` or `none`. Hot-plugged nodes inherit it. See [libsystemd Device Reporting](#libsystemd-device-reporting).
 
 Any additional parameters in the configuration file are passed to the driver's initialization function. The interpretation of these parameters depends on the specific driver implementation.
 
@@ -216,6 +216,7 @@ driver and asks what it is:
 | `DMDRVI_IOCTL_GFX_GET_INFO` | `display` | `[class=display] start=dmview@%name` - a display (any driver implementing the standard graphics ioctls) |
 | `DMDRVI_IOCTL_INPUT_GET_INFO` | `input` | `[class=input] start=...@%name` - an input device (touch panel, mouse, buttons) |
 | `DMDRVI_IOCTL_AUDIO_GET_INFO` | `audio` | `[class=audio] start=...@%name` - an audio device (any driver implementing the standard audio ioctls, e.g. a codec such as dmwm8994) |
+| `DMDRVI_IOCTL_RTC_GET_INFO` | `rtc` | `[class=rtc] start=dmutc@%name` - a clock, including an unset calendar; the library service receives the reported path as `%v` |
 
 A node can be reported under several classes, or under none (then nothing
 happens). The class names are defined in `dmdevfs.h` (`DMDEVFS_CLASS_*`). Each report is `libsystemd_notify_device_added(class, name, path)`:
