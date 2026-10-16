@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.18)
 
 project(dmdevfs_tests VERSION 1.0 DESCRIPTION "DMDEVFS Unit Tests" LANGUAGES C)
 
+# Tests consume dmdevfs; only the filesystem implements the driver MAL.
+set(DMOD_MAL_IMPLS "")
+
 # Ensure DMOD is available
 if(NOT DMOD_DIR)
     message(FATAL_ERROR "DMOD_DIR not set. Tests must be built as part of main project.")
@@ -98,7 +101,8 @@ target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
 )
 # dmdrvi: DMDRVI_IOCTL_DEVFS_GET_FRIEND (2.4), DMDRVI_IOCTL_AUDIO_* (2.6)
 dmod_link_modules(${DMOD_MODULE_NAME}
-    dmdrvi@>=2.6
+    dmdrvi
+    dmini
     dmfsi
     dmhaman
     dmosi
@@ -124,7 +128,7 @@ target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
-    dmdrvi@>=2.6
+    dmdrvi
     dmhaman
     dmosi
 )
@@ -143,7 +147,7 @@ target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
-    dmdrvi@>=2.6
+    dmdrvi
     dmhaman
     dmosi
     libsystemd
@@ -163,11 +167,18 @@ target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
 )
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
-    dmdrvi@>=2.6
+    dmdrvi
     dmhaman
     dmosi
     libsystemd
 )
+dmdevfs_register_test(${DMOD_MODULE_NAME})
+
+# Mount teardown while asynchronous node probing is in flight.
+set(DMOD_MODULE_NAME test_mount_lifetime)
+dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION} test_mount_lifetime.c)
+target_include_directories(${DMOD_MODULE_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv)
+dmod_link_modules(${DMOD_MODULE_NAME} dmfsi dmosi)
 dmdevfs_register_test(${DMOD_MODULE_NAME})
 
 # Print information about tests

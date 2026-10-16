@@ -18,7 +18,8 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
 )
 
 dmod_link_modules(${DMOD_MODULE_NAME}
-    dmdrvi@>=2.6
+    dmdrvi
     dmini
     dmlist
+    dmosi
 )

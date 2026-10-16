@@ -12,12 +12,22 @@
 #define DMDEVFS_MOCKDRV_IOCTL_SET_MEDIA 0x1003  /* arg: const uint64_t* block count - only while unplugged; clears the medium */
 #define DMDEVFS_MOCKDRV_IOCTL_WRITE_SECTOR 0x1004 /* arg: const dmdevfs_mockdrv_sector_t* - raw write, plugged or not */
 
+#define DMDEVFS_MOCKDRV_IOCTL_GET_OPEN_FLAGS 0x1005 /* arg: uint32_t* - exact flags passed to this handle */
+
 /** Logical block size of the child's medium. */
 #define DMDEVFS_MOCKDRV_BLOCK_SIZE      512u
 
 #include <stdint.h>
 
 /** Monitor contract calls a monitored host node received so far, and opens of its nodes. */
+#define DMDEVFS_MOCKDRV_IOCTL_PROBE_GATE 0x1006
+/* Test-owned semaphore handles; remain alive until the driver is freed. */
+typedef struct {
+    void* entered;
+    void* release;
+    void* freed;
+} dmdevfs_mockdrv_probe_gate_t;
+
 typedef struct
 {
     uint32_t    events;         /**< DMDRVI_IOCTL_MONITOR_EVENT */
