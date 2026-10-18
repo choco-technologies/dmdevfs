@@ -41,6 +41,9 @@ typedef struct
     dmod_dmfsi_mounted_t    mounted;
     dmod_dmfsi_fopen_t      fopen;
     dmod_dmfsi_fclose_t     fclose;
+    dmod_dmfsi_fread_t      fread;
+    dmod_dmfsi_fwrite_t     fwrite;
+    dmod_dmfsi_stat_t       stat;
     dmod_dmfsi_ioctl_t      ioctl;
 } devfs_t;
 
@@ -60,8 +63,12 @@ static bool load_devfs(void)
     g_fs.mounted = Dmod_GetDifFunction(module, dmod_dmfsi_mounted_sig);
     g_fs.fopen   = Dmod_GetDifFunction(module, dmod_dmfsi_fopen_sig);
     g_fs.fclose  = Dmod_GetDifFunction(module, dmod_dmfsi_fclose_sig);
+    g_fs.fread   = Dmod_GetDifFunction(module, dmod_dmfsi_fread_sig);
+    g_fs.fwrite  = Dmod_GetDifFunction(module, dmod_dmfsi_fwrite_sig);
+    g_fs.stat    = Dmod_GetDifFunction(module, dmod_dmfsi_stat_sig);
     g_fs.ioctl   = Dmod_GetDifFunction(module, dmod_dmfsi_ioctl_sig);
-    return g_fs.init && g_fs.deinit && g_fs.mounted && g_fs.fopen && g_fs.fclose && g_fs.ioctl;
+    return g_fs.init && g_fs.deinit && g_fs.mounted && g_fs.fopen && g_fs.fclose && g_fs.fread && g_fs.fwrite &&
+           g_fs.stat && g_fs.ioctl;
 }
 
 static bool wait_ready(const char* unit, const char* path);
@@ -248,6 +255,54 @@ static void ask_friend(dmdrvi_devfs_friend_t* f, uint32_t index, char* path, siz
     f->path_size = path_size;
     f->role = role;
     f->role_size = role_size;
+}
+
+DMOD_TEST_STEP(dmdevfs_has_no_device_secret_node_without_a_secret)
+{
+    void* fp = NULL;
+
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+    /* No secret in the mount's configuration string: no /dev/devkey */
+    DMOD_TEST_EXPECT_NE(g_fs.fopen(g_mount, &fp, "/devkey", DMFSI_O_RDONLY, 0), 0);
+    /* ... and the other built-in node is there as ever */
+    DMOD_TEST_EXPECT_EQ(g_fs.fopen(g_mount, &fp, "/null", DMFSI_O_RDONLY, 0), 0);
+    g_fs.fclose(g_mount, fp);
+}
+
+DMOD_TEST_STEP(dmdevfs_serves_the_device_secret_of_the_mount_string)
+{
+    void* fp = NULL;
+    char buffer[80];
+    size_t n = 0;
+    dmfsi_stat_t st;
+
+    /* "<config path>,<secret>": the secret is what follows the FIRST comma, commas included */
+    g_fs.deinit(g_mount);
+    g_mount = g_fs.init(DMDEVFS_TEST_FIXTURES_DIR "/config,hunter2, with a comma#@!");
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+
+    DMOD_TEST_EXPECT_EQ(g_fs.fopen(g_mount, &fp, "/devkey", DMFSI_O_RDONLY, 0), 0);
+    memset(buffer, 0x55, sizeof(buffer));
+    DMOD_TEST_EXPECT_EQ(g_fs.fread(g_mount, fp, buffer, sizeof(buffer), &n), 0);
+    DMOD_TEST_EXPECT_EQ(n, strlen("hunter2, with a comma#@!"));
+    DMOD_TEST_EXPECT_EQ(memcmp(buffer, "hunter2, with a comma#@!", n), 0);
+    DMOD_TEST_EXPECT_EQ(g_fs.fread(g_mount, fp, buffer, sizeof(buffer), &n), 0);     /* the end of it */
+    DMOD_TEST_EXPECT_EQ(n, 0);
+    DMOD_TEST_EXPECT_NE(g_fs.fwrite(g_mount, fp, "x", 1, &n), 0);                     /* read-only */
+    g_fs.fclose(g_mount, fp);
+
+    DMOD_TEST_EXPECT_EQ(g_fs.stat(g_mount, "/devkey", &st), 0);
+    DMOD_TEST_EXPECT_EQ(st.size, strlen("hunter2, with a comma#@!"));
+
+    /* the configuration still came from the path before the comma: the mock drivers are there */
+    DMOD_TEST_EXPECT_EQ(g_fs.fopen(g_mount, &fp, "/dmdevfs_mockdrv1", DMFSI_O_RDONLY, 0), 0);
+    g_fs.fclose(g_mount, fp);
+
+    g_fs.deinit(g_mount);
+    g_mount = NULL;
+
+    /* a secret that is too long, and one with no path, are not taken as they are */
+    DMOD_TEST_EXPECT_NULL(g_fs.init(",only-a-secret"));
 }
 
 DMOD_TEST_STEP(dmdevfs_finds_friends_of_a_node)

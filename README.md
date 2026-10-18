@@ -118,6 +118,19 @@ dmvfs_deinit();
 
 Every DMDEVFS mount always exposes a `null` device at its root, regardless of configuration - e.g. `/mnt/null` (or `/dev/null` when mounted at `/dev`). Reads from it report EOF immediately (0 bytes) and writes to it are silently discarded while reporting every byte as written, matching the usual meaning of `/dev/null`. It is implemented directly by DMDEVFS rather than by a loaded driver module, so no `.ini` configuration or dmdrvi driver is needed to use it.
 
+## The device secret
+
+The mount's configuration string may carry a secret after a comma:
+`"/configs/drivers,<secret>"` - the path is what is before the **first** comma, the
+secret (1..64 bytes, commas allowed) is everything after it. The platform that boots
+the system (dmod-boot, from its build) gives it so; DMDEVFS then exposes it as a
+read-only node, `devkey`, at the root of that mount (`/dev/devkey`). It is not kept
+in the configuration path and not logged. It is the root of what the system keeps
+encrypted at rest (see dmsecrets): a module reads it to derive its own key and keeps
+nothing; when the system has users, permissions on the node say who may read it.
+Without a secret in the string there is no `devkey` node. An older DMDEVFS would take
+the whole string as the path - a platform that passes a secret needs this version.
+
 ## Configuration Files
 
 DMDEVFS uses configuration files to define and initialize device drivers. This is a critical mechanism that allows the filesystem to dynamically discover and configure hardware drivers at mount time.
