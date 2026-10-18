@@ -40,6 +40,19 @@
  */
 #define DMDEVFS_NULL_DEVICE_NAME "null"
 
+/**
+ * @brief Name of the built-in device secret node, and the longest secret it holds
+ *
+ * dmdevfs takes the device secret the platform gives in the mount's configuration
+ * string ("<config path>,<secret>", see dmod-boot) and serves it as a read-only file
+ * at the root of that mount. It is the root of whatever the system keeps encrypted at rest (see
+ * dmsecrets): a module reads it to derive its own key and never keeps it. It is a
+ * node like any other, so when the system has users, permissions on it say who may
+ * read it. A system whose platform has no secret simply has no such node.
+ */
+#define DMDEVFS_DEVKEY_DEVICE_NAME "devkey"
+#define DMDEVFS_DEVKEY_MAX_SIZE    64
+
 /*
  * Device classes dmdevfs reports nodes under to libsystemd: DMDEVFS_CLASS_*
  * in dmdevfs.h (see report_node_added()).
@@ -123,6 +136,10 @@ typedef struct
     bool is_builtin;                    // True for devices implemented directly by dmdevfs (e.g. the "null"
                                          // device) rather than backed by a loaded dmdrvi driver module; driver
                                          // and driver_context are unused (NULL) for these nodes.
+    bool is_devkey;                     // True (together with is_builtin) for the device secret node: read-only,
+                                         // serves secret[0..secret_size).
+    uint8_t secret[DMDEVFS_DEVKEY_MAX_SIZE]; // The device secret (is_devkey only)
+    size_t secret_size;
     bool is_partition;                  // True for a partition of a block node (see scan_partitions()): shares
                                          // driver, driver_context and dev_num with that node, I/O is shifted by
                                          // part_offset and clipped to part_length. Never passed to dmdrvi_free().
@@ -312,6 +329,7 @@ static bool configure_required_dependencies(dmfsi_context_t ctx, dmlist_context_
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx, const char* section_name);
 static int unconfigure_drivers(dmfsi_context_t ctx);
 static driver_node_t* create_builtin_null_device(void);
+static driver_node_t* create_builtin_devkey_device(const char* secret, size_t size);
 static bool is_file(const char* path);
 static bool is_driver( const char* name);
 static void read_base_name(const char* path, char* base_name, size_t name_size);
@@ -505,7 +523,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
         return NULL;
     }
 
-    if(strlen(config) == 0)
+    if(strlen(config) == 0 || config[0] == ',')
     {
         DMOD_LOG_ERROR("Config path is empty\n");
         return NULL;
@@ -518,8 +536,38 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
         return NULL;
     }
     
+    // "<config path>[,<device secret>]": the secret is whatever follows the FIRST comma
+    // (it may contain commas itself). It is not kept in the configuration path, not
+    // logged, and the caller's string is the caller's to wipe.
+    const char* secret = config;
+    while(*secret != '\0' && *secret != ',')
+    {
+        secret++;
+    }
+    size_t path_length = (size_t)(secret - config);
+    if(*secret == '\0')
+    {
+        secret = NULL;
+    }
+    size_t secret_length = 0;
+    if(secret != NULL)
+    {
+        secret++;
+        secret_length = strlen(secret);
+        if(secret_length > DMDEVFS_DEVKEY_MAX_SIZE)
+        {
+            DMOD_LOG_ERROR("The device secret is longer than %d bytes - ignored\n", DMDEVFS_DEVKEY_MAX_SIZE);
+            secret_length = 0;
+        }
+    }
+
     ctx->magic = DMDEVFS_CONTEXT_MAGIC;
-    ctx->config_path = Dmod_StrDup(config);
+    ctx->config_path = Dmod_Malloc(path_length + 1);
+    if(ctx->config_path != NULL)
+    {
+        memcpy(ctx->config_path, config, path_length);
+        ctx->config_path[path_length] = '\0';
+    }
     ctx->drivers = dmlist_create();
     ctx->worker_refs = 0;
     ctx->stopping = false;
@@ -541,6 +589,17 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     {
         DMOD_LOG_ERROR("Failed to register built-in null device\n");
         Dmod_Free(null_device);
+    }
+
+    // The device secret, when the platform gave one
+    if(secret_length > 0)
+    {
+        driver_node_t* devkey_device = create_builtin_devkey_device(secret, secret_length);
+        if (devkey_device != NULL && !dmlist_push_back(ctx->drivers, devkey_device))
+        {
+            DMOD_LOG_ERROR("Failed to register the device secret node\n");
+            free_driver_node(devkey_device);
+        }
     }
 
     // Registered before configuring any driver (rather than after, as
@@ -766,7 +825,20 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fread, (dmfsi_context_t ctx,
     file_handle_t* handle = (file_handle_t*)fp;
 
     dmdrvi_ssize_t bytes_read;
-    if(handle->driver->is_builtin)
+    if(handle->driver->is_devkey)
+    {
+        // The device secret: a read-only file
+        size_t secret_size = handle->driver->secret_size;
+        size_t at = (handle->offset < 0) ? 0 : (size_t)handle->offset;
+        if(at > secret_size)
+        {
+            at = secret_size;
+        }
+        size_t n = (size < secret_size - at) ? size : secret_size - at;
+        memcpy(buffer, handle->driver->secret + at, n);
+        bytes_read = (dmdrvi_ssize_t)n;
+    }
+    else if(handle->driver->is_builtin)
     {
         // /dev/null: always at EOF
         bytes_read = 0;
@@ -819,6 +891,13 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fwrite, (dmfsi_context_t ctx
     }
     
     file_handle_t* handle = (file_handle_t*)fp;
+
+    if(handle->driver->is_devkey)
+    {
+        // The device secret is read-only
+        if(written) *written = 0;
+        return DMFSI_ERR_INVALID;
+    }
 
     dmdrvi_ssize_t bytes_written = (dmdrvi_ssize_t)size;   // /dev/null: silently discard the data, report it all as written
     int result = handle->driver->is_builtin ? DMFSI_OK : write_to_driver(handle, buffer, size, &bytes_written);
@@ -1605,6 +1684,8 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->was_enabled = was_enabled;
     driver_node->is_dynamic = false;
     driver_node->is_builtin = false;
+    driver_node->is_devkey = false;
+    driver_node->secret_size = 0;
     driver_node->is_partition = false;
     driver_node->part_offset = 0;
     driver_node->part_length = 0;
@@ -2113,6 +2194,28 @@ static driver_node_t* create_builtin_null_device(void)
     memset(node, 0, sizeof(*node));
     node->is_builtin = true;
     Dmod_SnPrintf(node->path, sizeof(node->path), "/%s", DMDEVFS_NULL_DEVICE_NAME);
+    return node;
+}
+
+/**
+ * @brief Create the built-in device secret node (see DMDEVFS_DEVKEY_DEVICE_NAME)
+ *        from the secret given in the mount's configuration string
+ */
+static driver_node_t* create_builtin_devkey_device(const char* secret, size_t size)
+{
+    driver_node_t* node = Dmod_Malloc(sizeof(driver_node_t));
+    if (node == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for the device secret node\n");
+        return NULL;
+    }
+
+    memset(node, 0, sizeof(*node));
+    node->is_builtin = true;
+    node->is_devkey = true;
+    node->secret_size = size;
+    memcpy(node->secret, secret, size);
+    Dmod_SnPrintf(node->path, sizeof(node->path), "/%s", DMDEVFS_DEVKEY_DEVICE_NAME);
     return node;
 }
 
@@ -2708,6 +2811,12 @@ static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t*
     {
         // /dev/null: empty, regular, readable/writable file
         memset(stat, 0, sizeof(*stat));
+        if (context->is_devkey)
+        {
+            // The device secret: a regular file of its size, readable by its owner only
+            stat->size = context->secret_size;
+            stat->mode = 0100000 | 0400;
+        }
         return DMFSI_OK;
     }
 
@@ -3799,6 +3908,14 @@ static void free_driver_node( driver_node_t* node )
     {
         Dmod_Free(node->parent_path);
     }
+    if (node->is_devkey)
+    {
+        volatile uint8_t* secret = node->secret;
+        for (size_t i = 0; i < sizeof(node->secret); i++)
+        {
+            secret[i] = 0;
+        }
+    }
     Dmod_Free(node);
 }
 
@@ -4035,6 +4152,8 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     new_node->was_enabled = false;
     new_node->is_dynamic = true;
     new_node->is_builtin = false;
+    new_node->is_devkey = false;
+    new_node->secret_size = 0;
     new_node->is_partition = false;
     new_node->part_offset = 0;
     new_node->part_length = 0;
