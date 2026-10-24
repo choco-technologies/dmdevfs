@@ -2,7 +2,8 @@
 #include "dmod.h"
 #include "dmfsi.h"
 #include "dmdevfs.h"
-
+#include "dmdevfs_types.h"
+#include "dmdevfs_context.h"
 
 /**
  * @brief Initialize the file system
@@ -11,7 +12,9 @@
  */
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs,  dmfsi_context_t, _init, (const char* config) )
 {
-    return NULL;
+    dmfsi_context_t context = context_new();
+
+    return context;
 }
 
 /**

@@ -63,6 +63,7 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     # List of source files - can include C and C++ files
     src/dmdevfs.c
     src/dmfsi.c
+    src/dmdevfs_context.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
@@ -78,6 +79,7 @@ dmod_link_modules(${DMOD_MODULE_NAME}
     dmfsi
     dmdrvi 
     dmlist
+    dmini
 )
 enable_testing()
 add_subdirectory(tests)
