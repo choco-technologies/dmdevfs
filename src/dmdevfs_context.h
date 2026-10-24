@@ -44,6 +44,11 @@ extern bool context_remove_node( dmfsi_context_t context, device_node_t* node );
 extern bool context_sort_nodes( dmfsi_context_t context );
 
 /**
+ * @brief configures the nodes
+ */
+extern bool context_configure_nodes( dmfsi_context_t context );
+
+/**
  * @brief adds the driver to the list
  */
 extern bool context_add_driver( dmfsi_context_t context, driver_t* driver );

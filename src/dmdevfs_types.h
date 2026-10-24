@@ -45,7 +45,7 @@ typedef struct driver
 {
     uint32_t            magic;          //!< DMDEVFS_DRIVER_MAGIC
     char*               name;           //!< Name of the driver
-    Dmod_Context_t      context;
+    Dmod_Context_t*     context;
     void*               mutex;
     struct 
     {

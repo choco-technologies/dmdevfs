@@ -6,5 +6,6 @@
  */
 bool configure_all( dmfsi_context_t context )
 {
-    return context_sort_nodes(context);
+    return context_sort_nodes(context) 
+        && context_configure_nodes(context);
 }

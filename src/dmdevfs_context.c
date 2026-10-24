@@ -54,6 +54,19 @@ bool node_destructor(void* node, void* user_data)
 }
 
 /**
+ * @brief node configuration
+ */
+static bool configure(void* data, void* user_data)
+{
+    device_node_t* node = data;
+    dmfsi_context_t context = user_data;
+
+    node_configure(node);    
+
+    return true;
+}
+
+/**
  * @brief allocates new context
  */
 dmfsi_context_t context_new()
@@ -184,6 +197,21 @@ bool context_sort_nodes( dmfsi_context_t context )
     {
         success = dmlist_sort(context->nodes, compare_device_order);
         context_unlock(context);
+    }
+    return success;
+}
+
+/**
+ * @brief configures the nodes
+ */
+bool context_configure_nodes( dmfsi_context_t context )
+{
+    bool success = false;
+    if(context_lock(context))
+    {
+        dmlist_foreach(context->nodes, configure, context);
+        context_unlock(context);
+        success = true;
     }
     return success;
 }

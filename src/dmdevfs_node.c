@@ -1,5 +1,5 @@
 #include "dmdevfs_node.h"
-
+#include "dmdevfs_driver.h"
 
 /**
  * @brief creates the device node
@@ -99,4 +99,26 @@ void node_unlock( device_node_t* node)
     {
         Dmod_Mutex_Unlock(node);
     }
+}
+
+/**
+ * @brief configures the node
+ */
+bool node_configure( device_node_t* node )
+{
+    if(node_lock(node))
+    {
+        bool enabled = driver_enable(node->driver);
+        if(!enabled)
+        {
+            DMOD_LOG_ERROR("Cannot configure node '%s'/%s - driver is not enabled\n", node->config_path, node->section_name != NULL ? node->section_name : "<global>");
+        }
+        else 
+        {
+            
+        }
+        node_unlock(node);
+        return true;
+    }
+    return false;
 }

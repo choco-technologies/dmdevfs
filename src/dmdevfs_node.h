@@ -28,4 +28,9 @@ extern bool node_lock( device_node_t* node );
  */
 extern void node_unlock( device_node_t* node);
 
+/**
+ * @brief configures the device node
+ */
+extern bool node_configure( device_node_t* node );
+
 #endif // DMDEVFS_NODE_H
