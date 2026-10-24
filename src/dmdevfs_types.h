@@ -3,6 +3,7 @@
 
 #include "dmfsi.h"
 #include "dmlist.h"
+#include "dmdrvi.h"
 
 /**
  * @brief magic for dmfsi_context
@@ -36,6 +37,10 @@ typedef struct driver
     char*               name;           //!< Name of the driver
     Dmod_Context_t      context;
     void*               mutex;
+    struct 
+    {
+        dmod_dmdrvi_create_t    create;
+    } api;
 } driver_t;
 
 /**
@@ -51,9 +56,10 @@ typedef struct device_node
     uint32_t            magic;          // DMDEVFS_DRIVER_NODE_MAGIC
     device_order_t      order;
     driver_t*           driver;         // reference to the driver
-    const char*         config_path;    //!< Path to the configuration file
-    const char*         section_name;   //!< Name of the section in the configuration file
+    char*               config_path;    //!< Path to the configuration file
+    char*               section_name;   //!< Name of the section in the configuration file
     void*               mutex;          //!< Mutex for locking the device node
+    char*               friends_group;  //!< Name of the friends group
 } device_node_t;
 
 #endif // DMDEVFS_TYPES_H

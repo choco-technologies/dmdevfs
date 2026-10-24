@@ -4,7 +4,7 @@
 /**
  * @brief creates the device node
  */
-device_node_t* node_new( const char* cfg_path, const char* section_name, driver_t* driver, device_order_t device_order )
+device_node_t* node_new( const char* cfg_path, const char* section_name, driver_t* driver, device_order_t device_order, const char* friends_group )
 {
     device_node_t* node = Dmod_Malloc(sizeof(device_node_t));
     if(node == NULL)
@@ -17,6 +17,7 @@ device_node_t* node_new( const char* cfg_path, const char* section_name, driver_
     node->driver = driver;
     node->order = device_order;
     node->config_path = Dmod_StrDup(cfg_path);
+    node->friends_group = friends_group == NULL ? NULL : Dmod_StrDup(friends_group);
     node->section_name = NULL;
     node->mutex = Dmod_Mutex_New(true);
     if(section_name != NULL)
@@ -24,7 +25,10 @@ device_node_t* node_new( const char* cfg_path, const char* section_name, driver_
         node->section_name = Dmod_StrDup(section_name);
     }
 
-    if(node->mutex == NULL || node->config_path == NULL || (section_name != NULL && node->section_name == NULL))
+    if(node->mutex == NULL || node->config_path == NULL 
+        || (section_name != NULL && node->section_name == NULL)
+        || (friends_group != NULL && node->friends_group == NULL)
+    )
     {
         DMOD_LOG_ERROR("Cannot allocate memory for node '%s' (section: '%s')\n", cfg_path, section_name != NULL ? section_name : "<global>");
         node_delete(node);
@@ -42,7 +46,7 @@ void node_delete( device_node_t* node )
     if(!node_is_valid(node))
     {
         DMOD_LOG_ERROR("Cannot delete node - it is invalid\n");
-        return false;
+        return;
     }
 
     node->magic = 0;
@@ -57,6 +61,10 @@ void node_delete( device_node_t* node )
     if(node->mutex != NULL)
     {
         Dmod_Mutex_Delete(node->mutex);
+    }
+    if(node->friends_group != NULL)
+    {
+        Dmod_Free(node->friends_group);
     }
 
     Dmod_Free(node);

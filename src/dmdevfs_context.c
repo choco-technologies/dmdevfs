@@ -15,7 +15,7 @@ int equal_pointers(const void* data1, const void* data2)
  */
 int equal_driver_name( const void* data1, const void* data2 )
 {
-    driver_t* driver = data1;
+    const driver_t* driver = data1;
     const char* name = data2;
     if(driver == NULL || name == NULL)
     {
@@ -27,17 +27,19 @@ int equal_driver_name( const void* data1, const void* data2 )
 /**
  * @brief destructor of the driver
  */
-void driver_destructor(void* driver, void* user_data)
+bool driver_destructor(void* driver, void* user_data)
 {
     driver_delete(driver);
+    return true;
 }
 
 /**
  * @brief destructor of the node
  */
-void node_destructor(void* node, void* user_data)
+bool node_destructor(void* node, void* user_data)
 {
     node_delete(node);
+    return true;
 }
 
 /**

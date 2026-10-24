@@ -183,8 +183,9 @@ bool scan_section( dmfsi_context_t context, dmini_context_t ini_context, const c
             return false;
         }
     }
+    const char* friends_group = dmini_get_string(ini_context, section_name, "friends_group", NULL);
 
-    device_node_t* node = node_new(cfg_path, section_name, driver, get_device_order(ini_context, section_name));
+    device_node_t* node = node_new(cfg_path, section_name, driver, get_device_order(ini_context, section_name), friends_group);
     if(node == NULL)
     {
         DMOD_LOG_ERROR("Cannot create node %s for %s/%s\n", driver_name, cfg_path, section_name != NULL ? section_name : "<global>");

@@ -6,7 +6,7 @@
 /**
  * @brief creates the device node
  */
-extern device_node_t* node_new( const char* cfg_path, const char* section_name, driver_t* driver, device_order_t order );
+extern device_node_t* node_new( const char* cfg_path, const char* section_name, driver_t* driver, device_order_t order, const char* friends_group );
 
 /**
  * @brief deletes the device node
