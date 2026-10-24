@@ -153,6 +153,7 @@ bool scan_file( dmfsi_context_t context, const char* path, const char* dir_name 
         }
     }
 
+    dmini_destroy(ini_context);
     return true;
 }
 

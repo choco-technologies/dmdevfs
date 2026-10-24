@@ -2,6 +2,8 @@
 #define DMDEVFS_SCAN_H
 
 #include "dmdevfs_types.h"
+#include "dmini.h"
+#include "dmfsi.h"
 
 /**
  * @brief scans the given configuration directory

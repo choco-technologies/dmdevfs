@@ -67,6 +67,7 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmdevfs_scan.c
     src/dmdevfs_driver.c
     src/dmdevfs_node.c
+    src/dmdevfs_configure.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
