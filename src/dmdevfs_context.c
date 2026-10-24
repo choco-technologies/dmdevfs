@@ -59,7 +59,7 @@ bool node_destructor(void* node, void* user_data)
 static bool configure(void* data, void* user_data)
 {
     device_node_t* node = data;
-    dmfsi_context_t context = user_data;
+    // dmfsi_context_t context = user_data;
 
     node_configure(node);    
 
@@ -145,7 +145,7 @@ bool context_is_valid( dmfsi_context_t context )
  */
 bool context_lock( dmfsi_context_t context )
 {
-    return Dmod_Mutex_Lock(context->mutex);
+    return Dmod_Mutex_Lock(context->mutex) == 0;
 }
 
 /**

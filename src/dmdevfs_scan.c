@@ -56,9 +56,18 @@ static bool module_exists(const char* module_name)
 static const char* guess_driver_name( dmfsi_context_t context, const char* cfg_path, dmini_context_t ini_context, const char* section_name, const char* dir_name )
 {
     const char* driver_name = dmini_get_string(ini_context, section_name, "driver_name", NULL);
-    if(driver_name != NULL && module_exists(driver_name))
+    bool driver_exists = false;
+    if(driver_name != NULL)
     {
-        return driver_name;
+        driver_exists = module_exists(driver_name);
+        if(!driver_exists)
+        {
+            DMOD_LOG_ERROR("Driver '%s' does not exist\n", driver_name);
+        }
+        else 
+        {
+            return driver_name;
+        }
     }
 
     if( section_name != NULL && module_exists(section_name))
@@ -82,7 +91,7 @@ static device_order_t get_device_order( dmini_context_t ini_context, const char*
 {
     if(dmini_has_key(ini_context, section_name, "driver_order"))
     {
-        return (device_order_t)(ini_context, section_name, "driver_order", 0);
+        return (device_order_t)dmini_get_int(ini_context, section_name, "driver_order", 0);
     } 
     return (device_order_t)dmini_get_int(ini_context, section_name, "device_order", 0);
 }
@@ -114,6 +123,8 @@ static lifecycle_t get_lifecycle( dmini_context_t ini_context, const char* secti
  */
 bool scan( dmfsi_context_t context, const char* path, const char* dir_name )
 {
+    DMOD_LOG_INFO("Scanning directory %s (parent dir_name: '%s'\n", path, dir_name != NULL ? dir_name : "<null>");
+
     void* dir = Dmod_OpenDir(path);
     if(dir == NULL)
     {
@@ -126,7 +137,9 @@ bool scan( dmfsi_context_t context, const char* path, const char* dir_name )
         char* full_path = Dmod_StrMerge(3, path, "/", dir_entry->name);
         if(dir_entry->type == Dmod_DirEntryType_Dir )
         {
-            scan(context, full_path, dir_entry->name);
+            char* dir_name = Dmod_StrDup(dir_entry->name);
+            scan(context, full_path, dir_name);
+            Dmod_Free(dir_name);
         }
         else if(dir_entry->type == Dmod_DirEntryType_File)
         {
@@ -145,6 +158,8 @@ bool scan( dmfsi_context_t context, const char* path, const char* dir_name )
  */
 bool scan_file( dmfsi_context_t context, const char* path, const char* dir_name )
 {
+    DMOD_LOG_INFO("Scanning file %s dir_name: %s\n", path, dir_name);
+
     if(!is_extension(path, "ini"))
     {
         DMOD_LOG_INFO("Skipping unrecognized file: '%s'\n", path);

@@ -1,4 +1,5 @@
 #define DMOD_ENABLE_REGISTRATION ON
+#define ENABLE_DIF_REGISTRATIONS    ON
 #include "dmod.h"
 #include "dmfsi.h"
 #include "dmdevfs.h"
@@ -6,6 +7,7 @@
 #include "dmdevfs_context.h"
 #include "dmdevfs_scan.h"
 #include "dmdevfs_configure.h"
+#include "dmdrvi.h"
 
 /**
  * @brief Initialize the file system
@@ -16,11 +18,28 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs,  dmfsi_context_t, _init, (const ch
 {
     dmfsi_context_t context = context_new();
 
-    bool success = scan(context, config, NULL);
+    char* config_path = Dmod_StrDup(config);
+    char* secret = config_path;
+    while(*secret != ',' && *secret != '\0')
+    {
+        secret++;
+    }
+    if(*secret == '\0')
+    {
+        secret = NULL;
+    }
+    else 
+    {
+        *secret = 0;
+    }
+
+    bool success = scan(context, config_path, NULL);
     if(success)
     {
         success = configure_all(context);
     }
+
+    Dmod_Free(config_path);
 
     return context;
 }

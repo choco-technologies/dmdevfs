@@ -73,7 +73,7 @@ bool driver_is_valid( driver_t* driver )
  */
 bool driver_lock( driver_t* driver )
 {
-    return driver_is_valid(driver) && Dmod_Mutex_Lock(driver->mutex);
+    return driver_is_valid(driver) && Dmod_Mutex_Lock(driver->mutex) == 0;
 }
 
 /**
@@ -82,6 +82,28 @@ bool driver_lock( driver_t* driver )
 void driver_unlock( driver_t* driver )
 {
     driver_is_valid(driver) && Dmod_Mutex_Unlock(driver->mutex);
+}
+
+/**
+ * @brief marks the driver as used
+ */
+void driver_begin_usage( driver_t* driver )
+{
+    if(driver_is_valid(driver))
+    {
+        Dmod_BeginUsage(driver->name);
+    }
+}
+
+/**
+ * @brief marks the driver as not used
+ */
+void driver_end_usage( driver_t* driver )
+{
+    if(driver_is_valid(driver))
+    {
+        Dmod_EndUsage(driver->name);
+    }
 }
 
 /**
@@ -107,6 +129,7 @@ bool driver_load( driver_t* driver )
 {
     if(driver_lock(driver))
     {
+        Dmod_Context_t* old_context = driver->context;
         if(!driver_is_loaded(driver))
         {
             driver->context = Dmod_LoadModuleByName(driver->name);
@@ -114,6 +137,10 @@ bool driver_load( driver_t* driver )
         else 
         {
             driver->context = Dmod_GetModuleContext(driver->name);
+        }
+        if(old_context != driver->context)
+        {
+            driver_clear_cache(driver);
         }
         driver_unlock(driver);
         return driver->context != NULL;
@@ -148,4 +175,16 @@ bool driver_enable( driver_t* driver )
         return enabled;
     }
     return false;
+}
+
+/**
+ * @brief clears the cache of the driver
+ */
+void driver_clear_cache( driver_t* driver )
+{
+    if(driver_lock(driver))
+    {
+        memset(&driver->api, 0, sizeof(driver->api));
+        driver_unlock(driver);
+    }
 }

@@ -71,6 +71,8 @@ typedef struct device_node
     void*               mutex;          //!< Mutex for locking the device node
     char*               friends_group;  //!< Name of the friends group
     lifecycle_t         lifecycle;      //!< Lifecycle of the node
+    dmdrvi_dev_num_t    dev_num;        //!< Device Node number
+    dmdrvi_context_t    context;        //!< Device Node Context
 } device_node_t;
 
 #endif // DMDEVFS_TYPES_H

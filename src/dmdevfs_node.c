@@ -1,5 +1,6 @@
 #include "dmdevfs_node.h"
 #include "dmdevfs_driver.h"
+#include "dmdevfs_dmdrvi.h"
 
 /**
  * @brief creates the device node
@@ -12,6 +13,8 @@ device_node_t* node_new( const char* cfg_path, const char* section_name, driver_
         DMOD_LOG_ERROR("Cannot allocate memory for device node '%s' (section: '%s')\n", cfg_path, section_name != NULL ? section_name : "<global>");
         return NULL;
     }
+
+    memset(node, 0, sizeof(device_node_t));
 
     node->magic = DMDEVFS_DRIVER_NODE_MAGIC;
     node->driver = driver;
@@ -87,7 +90,7 @@ bool node_is_valid( device_node_t* node )
  */
 extern bool node_lock( device_node_t* node )
 {
-    return node_is_valid(node) && Dmod_Mutex_Lock(node);
+    return node_is_valid(node) && Dmod_Mutex_Lock(node) == 0;
 }
 
 /**
@@ -113,9 +116,27 @@ bool node_configure( device_node_t* node )
         {
             DMOD_LOG_ERROR("Cannot configure node '%s'/%s - driver is not enabled\n", node->config_path, node->section_name != NULL ? node->section_name : "<global>");
         }
-        else 
+        else if(node->context == NULL)
         {
-            
+            static unsigned int token = 0xDEC1439UL;
+            dmini_context_t ini_context = node->section_name != NULL ? dmini_create_with_token(token) : dmini_create();
+            if(ini_context == NULL)
+            {
+                DMOD_LOG_ERROR("Cannot create dmini context\n");
+            }
+            else if(dmini_parse_file(ini_context, node->config_path) != DMINI_OK)
+            {
+                DMOD_LOG_ERROR("Cannot parse ini file '%s'\n", node->config_path);
+            }
+            else 
+            {
+                if(node->section_name != NULL)
+                {
+                    dmini_set_active_section(ini_context, node->section_name, token);
+                }
+                node->context = dmdrvi_create(node->driver, ini_context, &node->dev_num);
+            }
+            dmini_destroy(ini_context);
         }
         node_unlock(node);
         return true;
