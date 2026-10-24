@@ -4,6 +4,7 @@
 #include "dmdevfs.h"
 #include "dmdevfs_types.h"
 #include "dmdevfs_context.h"
+#include "dmdevfs_scan.h"
 
 /**
  * @brief Initialize the file system
@@ -13,6 +14,8 @@
 dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs,  dmfsi_context_t, _init, (const char* config) )
 {
     dmfsi_context_t context = context_new();
+
+    scan(context, config);
 
     return context;
 }
