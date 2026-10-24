@@ -174,6 +174,26 @@ dmod_link_modules(${DMOD_MODULE_NAME}
 )
 dmdevfs_register_test(${DMOD_MODULE_NAME})
 
+# test_config_dir - configuration directories of mount points (dmdevfs_add_config_dir())
+set(DMOD_MODULE_NAME        test_config_dir)
+dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
+    test_config_dir.c
+)
+target_include_directories(${DMOD_MODULE_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_BINARY_DIR}
+)
+target_compile_definitions(${DMOD_MODULE_NAME} PRIVATE
+    DMDEVFS_TEST_FIXTURES_DIR="fixtures"
+)
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmfsi
+    dmdrvi
+    dmosi
+)
+dmdevfs_register_test(${DMOD_MODULE_NAME})
+
 # Mount teardown while asynchronous node probing is in flight.
 set(DMOD_MODULE_NAME test_mount_lifetime)
 dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION} test_mount_lifetime.c)
