@@ -51,7 +51,7 @@ set(DMOD_DMR_PATH           ${CMAKE_CURRENT_SOURCE_DIR}/dmdevfs.dmr)
 set(DMOD_MAL_IMPLS          )
 
 # List of DIF interfaces implemented by this module (leave empty if none)
-set(DMOD_DIF_IMPLS          )
+set(DMOD_DIF_IMPLS          dmfsi)
 
 #
 #   dmod_add_library - create a library module
@@ -62,6 +62,7 @@ set(DMOD_DIF_IMPLS          )
 dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     # List of source files - can include C and C++ files
     src/dmdevfs.c
+    src/dmfsi.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
@@ -73,8 +74,10 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
 )
 
 # To depend on another module's headers, use:
-#   dmod_link_modules(${DMOD_MODULE_NAME}
-#       other_module@1.0
-#   )
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmfsi
+    dmdrvi 
+    dmlist
+)
 enable_testing()
 add_subdirectory(tests)

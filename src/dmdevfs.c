@@ -1,57 +1,5 @@
-#define DMOD_ENABLE_REGISTRATION ON
 #include "dmod.h"
 #include "dmdevfs.h"
-
-/* Example internal state - replace with your module's real fields. */
-struct dmdevfs
-{
-    bool valid;
-};
-
-dmod_dmdevfs_api_declaration(1.0, dmdevfs_t, _create, ( void ))
-{
-    /* Dmod_Malloc/Dmod_Free (SAL) are dmod's own heap functions - embedded
-     * targets don't necessarily link a libc allocator, so use these instead
-     * of malloc()/free() in module code. */
-    struct dmdevfs *instance = Dmod_Malloc(sizeof(*instance));
-    if (instance == NULL)
-    {
-        return NULL;
-    }
-
-    instance->valid = true;
-    return instance;
-}
-
-dmod_dmdevfs_api_declaration(1.0, void, _destroy, ( dmdevfs_t handle ))
-{
-    Dmod_Free(handle);
-}
-
-dmod_dmdevfs_api_declaration(1.0, bool, _is_valid, ( dmdevfs_t handle ))
-{
-    return handle != NULL && handle->valid;
-}
-
-/**
- * @brief Pre-initialization function for the module.
- *
- * @note This function is optional. You can remove it if you don't need it.
- *
- * This function is called when the module enabling is in progress.
- *
- * You can use this function to load the required dependencies, such as
- * other modules. Please be aware that the module is not fully initialized,
- * so not all the API functions are available - you can check if the API
- * is connected by calling the Dmod_IsFunctionConnected() function.
- */
-void dmod_preinit(void)
-{
-    if(Dmod_IsFunctionConnected( Dmod_Printf ))
-    {
-        Dmod_Printf("API is connected!\n");
-    }
-}
 
 /**
  * @brief Initialization function for the module.
@@ -64,7 +12,7 @@ void dmod_preinit(void)
  */
 int dmod_init(const Dmod_Config_t *Config)
 {
-    Dmod_Printf("Hello, World!\n");
+    DMOD_LOG_INFO("Initialized\n");
     return 0;
 }
 
@@ -79,6 +27,6 @@ int dmod_init(const Dmod_Config_t *Config)
  */
 int dmod_deinit(void)
 {
-    Dmod_Printf("Goodbye, World!\n");
+    DMOD_LOG_INFO("Deinitialized\n");
     return 0;
 }
