@@ -206,6 +206,12 @@ DMOD_TEST_STEP(runtime_sources_invalidate_already_unplugged_child_handles)
     DMOD_TEST_EXPECT_EQ(done, 0);
     DMOD_TEST_EXPECT_EQ(fs_close(mount, child), 0);
     DMOD_TEST_EXPECT_EQ(command(DMDEVFS_IOCTL_ADD_CONFIG, EXT), 0);
+    // Teardown must not retain a reference from the unplug callback.
+    DMOD_TEST_EXPECT_EQ(fs_close(mount, control), 0);
+    control = NULL;
+    int ret = fs_deinit(mount);
+    DMOD_TEST_EXPECT_EQ(ret, 0);
+    if (ret == 0) mount = NULL;
 }
 
 DMOD_TEST_STEP(runtime_sources_remove_partition_descendants)
@@ -249,4 +255,38 @@ DMOD_TEST_STEP(runtime_sources_open_directory_survives_source_removal)
     DMOD_TEST_EXPECT_EQ(fs_closedir(mount, dir), 0);
     DMOD_TEST_EXPECT_EQ(dmosi_semaphore_wait(gate.freed, 1, 2000), 0);
     dmosi_semaphore_destroy(gate.freed);
+}
+
+DMOD_TEST_STEP(runtime_sources_readd_while_old_handles_are_open)
+{
+    DMOD_TEST_EXPECT_EQ(command(DMDEVFS_IOCTL_ADD_CONFIG, EXT), 0);
+    DMOD_TEST_EXPECT_EQ(node_command(HOST(40), DMDEVFS_MOCKDRV_IOCTL_PLUG, NULL), 0);
+    DMOD_TEST_EXPECT_TRUE(wait_node(HOST(40) "/0"));
+    void* old = NULL;
+    DMOD_TEST_EXPECT_EQ(fs_open(mount, &old, HOST(40), DMFSI_O_RDWR, 0), 0);
+    dmdevfs_mockdrv_stats_t before = {0}, after = {0};
+    DMOD_TEST_EXPECT_EQ(fs_ioctl(mount, old, DMDEVFS_MOCKDRV_IOCTL_GET_STATS, &before), 0);
+    DMOD_TEST_EXPECT_EQ(command(DMDEVFS_IOCTL_REMOVE_CONFIG, EXT), 0);
+
+    // Withdrawn nodes still held by old handles must be invisible in a
+    // newly opened directory, including the old child's parent directory.
+    void* dir = NULL;
+    DMOD_TEST_EXPECT_EQ(fs_opendir(mount, &dir, "/"), 0);
+    dmfsi_dir_entry_t entry;
+    unsigned entries = 0;
+    while (fs_readdir(mount, dir, &entry) == 0 && entries < 10)
+    {
+        DMOD_TEST_EXPECT_TRUE(strcmp(entry.name, "dmdevfs_mockdrv40") != 0);
+        ++entries;
+    }
+    DMOD_TEST_EXPECT_EQ(entries, 2);
+    DMOD_TEST_EXPECT_EQ(fs_closedir(mount, dir), 0);
+    DMOD_TEST_EXPECT_EQ(command(DMDEVFS_IOCTL_ADD_CONFIG, EXT), 0);
+    DMOD_TEST_EXPECT_EQ(node_command(HOST(40), DMDEVFS_MOCKDRV_IOCTL_GET_STATS, &after), 0);
+    DMOD_TEST_EXPECT_TRUE(after.create_seq > before.create_seq);
+    DMOD_TEST_EXPECT_FALSE(exists(HOST(40) "/0"));
+    DMOD_TEST_EXPECT_EQ(fs_ioctl(mount, old, DMDEVFS_MOCKDRV_IOCTL_GET_STATS, &before), -ENODEV);
+    DMOD_TEST_EXPECT_EQ(fs_close(mount, old), 0);
+    DMOD_TEST_EXPECT_EQ(command(DMDEVFS_IOCTL_REMOVE_CONFIG, EXT), 0);
+    DMOD_TEST_EXPECT_TRUE(exists(HOST(0)));
 }

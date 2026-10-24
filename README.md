@@ -153,7 +153,10 @@ Dmod_FileClose(control);
 ```
 
 The directory given at mount and all added directories coexist. Each node,
-including hot-plug children and partitions, belongs to its source tree.
+including hot-plug children and partitions, belongs to its source tree. The
+mount keeps nodes in one `dmlist`; source records store only their path,
+removal state and reference count. Withdrawn nodes stay in that list until
+their source can be reclaimed and are skipped by lookups and directory reads.
 Removal withdraws only that tree's nodes, reports their disappearance to
 libsystemd and their friends, and preserves the other trees and the mount.
 Existing handles from the removed tree fail read/write/ioctl/flush operations

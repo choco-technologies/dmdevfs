@@ -103,7 +103,8 @@ normalization and rejected paths, rollback after a driver failure or node
 collision, repeated add/remove cycles, removal of the boot source while a
 shared driver remains active, and removal after the source files disappear.
 It also covers hot-plug children and partitions, open file handles (including
-an already-unplugged child), and directory handles retained across removal.
+an already-unplugged child), directory handles retained across removal, and
+re-adding a source while its previous handles remain open.
 Fixtures live in `fixtures/runtime`. One test creates and removes its own
 `runtime-temporary` directory in the test working directory.
 

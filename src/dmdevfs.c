@@ -128,9 +128,6 @@ typedef struct config_source config_source_t;
 typedef struct driver_node
 {
     config_source_t* source;    // Configuration tree owning this node (also inherited by children).
-    bool source_retired;
-    struct driver_node* owner_next; // Live driver contexts, including retired sources.
-    struct driver_node* retired_next; // Intrusive list: removal must not allocate memory.
     dmdrvi_context_t driver_context;    // Driver-specific context
     Dmod_Context_t*  driver;            // Driver module context
     dmdrvi_dev_num_t dev_num;           // Device number assigned to the driver
@@ -160,23 +157,20 @@ typedef struct driver_node
                                          // libsystemd; guarded by g_devfs_mutex (see report_node_added()).
     int  open_count;                    // Number of file_handle_t's currently open against this node (see
                                          // _fopen()/_fclose()) - guards the free below against a still-open handle.
-    bool removed;                       // True once process_device_unavailable() has taken this node out of
-                                         // mount->drivers - the node itself is only actually freed once
+    bool removed;                       // Hidden from lookups. Source removal retains it in mount->drivers;
+                                         // hot-plug removal detaches it. Metadata is freed only once
                                          // open_count also reaches zero (see _fclose()), so a handle opened
                                          // before removal can keep reading/writing/closing it safely instead of
                                          // dereferencing memory dmdevfs already freed out from under it.
 } driver_node_t;
 
 /* Records outlive open handles, including handles to already-unplugged children.
- * Only the worker mutates this list; refs is guarded by g_devfs_mutex. */
+ * Source records contain no device lists; refs is guarded by g_devfs_mutex. */
 struct config_source
 {
-    config_source_t* next;
     char* path;
     unsigned refs;
     bool removed;
-    bool retiring;
-    driver_node_t* retired;
 };
 
 typedef struct
@@ -285,10 +279,10 @@ typedef struct
 struct dmfsi_context
 {
     uint32_t    magic;
-    config_source_t* sources;
+    dmlist_context_t* sources;
     config_source_t* adding_source;
     char* config_path;          // Path with the configuration files
-    dmlist_context_t* drivers;  // List of loaded drivers
+    dmlist_context_t* drivers;  // Owns all nodes, including source-removed nodes awaiting close.
     uint64_t generation;
     unsigned directory_refs;
     unsigned worker_refs;        // Active unlocked worker operations; guarded by g_devfs_mutex.
@@ -345,7 +339,7 @@ static dmosi_thread_t     g_hotplug_thread    = NULL;
 // ============================================================================
 //                      Local prototypes
 // ============================================================================
-static driver_node_t* g_driver_owners = NULL; // Guarded by g_devfs_mutex.
+static dmlist_context_t* g_driver_owners = NULL; // Non-owning index of shared module users; guarded by g_devfs_mutex.
 
 static int configure_drivers(dmfsi_context_t ctx, const char* driver_name, const char* config_path);
 static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* config_files, const char* driver_name, const char* config_path, bool strict);
@@ -380,7 +374,7 @@ static driver_node_t* next_directory_node(directory_node_t* dir);
 
 static driver_node_t* find_driver_node( dmfsi_context_t ctx, const char* path );
 static driver_node_t* find_and_ref_driver_node( dmfsi_context_t ctx, const char* path );
-static void release_driver_node_ref( driver_node_t* node );
+static void release_driver_node_ref( dmfsi_context_t ctx, driver_node_t* node );
 static int driver_stat( driver_node_t* context, const char* path, dmdrvi_stat_t* stat );
 static bool dev_num_equal( const dmdrvi_dev_num_t* a, const dmdrvi_dev_num_t* b );
 static int compare_driver_context( const void* data, const void* user_data );
@@ -491,13 +485,11 @@ static void destroy_configured_node(driver_node_t* node)
          * including an instance retired by another source or another mount. */
         driver_node_t* survivor = NULL;
         dmosi_mutex_lock(g_devfs_mutex);
-        driver_node_t** link = &g_driver_owners;
-        while (*link != NULL)
+        dmlist_remove(g_driver_owners, node, compare_driver);
+        for (size_t i = 0; i < dmlist_size(g_driver_owners); ++i)
         {
-            driver_node_t* other = *link;
-            if (other == node) { *link = node->owner_next; continue; }
-            if (other->driver == node->driver) survivor = other;
-            link = &other->owner_next;
+            driver_node_t* other = dmlist_get(g_driver_owners, i);
+            if (other->driver == node->driver) { survivor = other; break; }
         }
         if (survivor != NULL)
         {
@@ -513,81 +505,89 @@ static void destroy_configured_node(driver_node_t* node)
 
 static void reap_sources(dmfsi_context_t ctx)
 {
-    config_source_t** link = &ctx->sources;
-    while (*link != NULL)
+    for (size_t i = dmlist_size(ctx->sources); i-- > 0;)
     {
-        config_source_t* source = *link;
+        config_source_t* source = dmlist_get(ctx->sources, i);
         dmosi_mutex_lock(g_devfs_mutex);
-        bool reclaim = source->removed && !source->retiring && source->refs == 0;
+        bool reclaim = source->removed && source->refs == 0;
         dmosi_mutex_unlock(g_devfs_mutex);
-        if (!reclaim) { link = &source->next; continue; }
-        // Retired nodes hold their contexts until every retained reference is gone.
-        while (source->retired != NULL)
+        if (!reclaim) continue;
+
+        // One driver list owns both visible and withdrawn nodes. Release
+        // children before owners, after all references to the source close.
+        for (size_t j = dmlist_size(ctx->drivers); j-- > 0;)
         {
-            driver_node_t* node = source->retired;
+            driver_node_t* node = dmlist_get(ctx->drivers, j);
+            if (node->source != source) continue;
             dmosi_mutex_lock(g_devfs_mutex);
-            source->retired = node->retired_next;
+            dmlist_remove(ctx->drivers, node, compare_driver);
             dmosi_mutex_unlock(g_devfs_mutex);
             destroy_configured_node(node);
         }
         dmosi_mutex_lock(g_devfs_mutex);
-        *link = source->next;
+        dmlist_remove(ctx->sources, source, compare_mount_context);
         dmosi_mutex_unlock(g_devfs_mutex);
         Dmod_Free(source->path);
         Dmod_Free(source);
     }
 }
 
+static config_source_t* find_config_source(dmfsi_context_t ctx, const char* path)
+{
+    for (size_t i = 0; i < dmlist_size(ctx->sources); ++i)
+    {
+        config_source_t* source = dmlist_get(ctx->sources, i);
+        if (!source->removed && strcmp(source->path, path) == 0) return source;
+    }
+    return NULL;
+}
+
 static int remove_config_source(dmfsi_context_t ctx, const char* path)
 {
-    config_source_t* source = ctx->sources;
-    while (source && (source->removed || strcmp(source->path, path) != 0)) source = source->next;
+    config_source_t* source = find_config_source(ctx, path);
     if (source == NULL) return -ENOENT;
-    source->retiring = true;
-    /* Detach the complete set atomically so no new open can acquire a node
-     * while service shutdown is in progress. Reverse creation order releases
-     * partitions and hot-plug children before their owning driver. */
+    // Mark the entire source atomically. Lookup and directory enumeration
+    // skip removed nodes; no list insertion or allocation is needed here.
     dmosi_mutex_lock(g_devfs_mutex);
     source->removed = true;
-    driver_node_t** tail = &source->retired;
+    for (size_t i = 0; i < dmlist_size(ctx->drivers); ++i)
+    {
+        driver_node_t* node = dmlist_get(ctx->drivers, i);
+        if (node->source == source) node->removed = true;
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
     for (size_t i = dmlist_size(ctx->drivers); i-- > 0;)
     {
         driver_node_t* node = dmlist_get(ctx->drivers, i);
         if (node->source != source) continue;
-        dmlist_remove(ctx->drivers, node, compare_driver);
-        node->source_retired = true;
-        node->removed = true;
-        node->retired_next = NULL;
-        *tail = node;
-        tail = &node->retired_next;
-    }
-    dmosi_mutex_unlock(g_devfs_mutex);
-    for (driver_node_t* node = source->retired; node; node = node->retired_next)
-    {
         report_node_removed(node);
         notify_friends_about_node(ctx, node, dmdrvi_dev_state_dead);
     }
-    source->retiring = false;
     return 0;
 }
 
 static int add_config_source(dmfsi_context_t ctx, const char* path)
 {
-    for (config_source_t* src = ctx->sources; src; src = src->next)
+    if (find_config_source(ctx, path) != NULL) return -EEXIST;
+    for (size_t i = 0; i < dmlist_size(ctx->sources); ++i)
     {
-        if (src->removed) continue;
-        if (strcmp(src->path, path) == 0) return -EEXIST;
-        if (source_contains(src->path, path) || source_contains(path, src->path)) return -EINVAL;
+        config_source_t* src = dmlist_get(ctx->sources, i);
+        if (!src->removed && (source_contains(src->path, path) || source_contains(path, src->path)))
+            return -EINVAL;
     }
     config_source_t* source = Dmod_Malloc(sizeof(*source));
     if (source == NULL) return -ENOMEM;
     memset(source, 0, sizeof(*source));
     source->path = Dmod_StrDup(path);
-    if (source->path == NULL) { Dmod_Free(source); return -ENOMEM; }
     dmosi_mutex_lock(g_devfs_mutex);
-    source->next = ctx->sources;
-    ctx->sources = source;
+    bool inserted = source->path != NULL && dmlist_push_back(ctx->sources, source);
     dmosi_mutex_unlock(g_devfs_mutex);
+    if (!inserted)
+    {
+        Dmod_Free(source->path);
+        Dmod_Free(source);
+        return -ENOMEM;
+    }
     ctx->adding_source = source;
     int ret = configure_drivers(ctx, NULL, path);
     ctx->adding_source = NULL;
@@ -601,9 +601,10 @@ static int add_config_source(dmfsi_context_t ctx, const char* path)
 
 static void destroy_sources(dmfsi_context_t ctx)
 {
-    for (config_source_t* source = ctx->sources; source; source = source->next)
-        source->removed = true;
+    for (size_t i = 0; i < dmlist_size(ctx->sources); ++i)
+        ((config_source_t*)dmlist_get(ctx->sources, i))->removed = true;
     reap_sources(ctx);
+    dmlist_destroy(ctx->sources);
 }
 
 static int source_command(dmfsi_context_t ctx, int request, const char* path)
@@ -682,12 +683,13 @@ void dmod_preinit(void)
  */
 int dmod_init(const Dmod_Config_t *Config)
 {
+    g_driver_owners     = dmlist_create();
     g_dmdevfs_mounts    = dmlist_create();
     g_devfs_mutex       = dmosi_mutex_create(false);
     g_hotplug_events    = dmlist_create();
     g_hotplug_mutex     = dmosi_mutex_create(false);
     g_hotplug_semaphore = dmosi_semaphore_create(0, UINT32_MAX);
-    if (g_dmdevfs_mounts == NULL || g_devfs_mutex == NULL || g_hotplug_events == NULL ||
+    if (g_driver_owners == NULL || g_dmdevfs_mounts == NULL || g_devfs_mutex == NULL || g_hotplug_events == NULL ||
         g_hotplug_mutex == NULL || g_hotplug_semaphore == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate hot-plug support resources\n");
@@ -758,6 +760,8 @@ int dmod_deinit(void)
     g_devfs_mutex = NULL;
     dmlist_destroy(g_dmdevfs_mounts);
     g_dmdevfs_mounts = NULL;
+    dmlist_destroy(g_driver_owners);
+    g_driver_owners = NULL;
     return 0;
 }
 
@@ -847,7 +851,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
         }
     }
 
-    ctx->sources = NULL;
+    ctx->sources = dmlist_create();
     ctx->adding_source = NULL;
     ctx->magic = DMDEVFS_CONTEXT_MAGIC;
     ctx->config_path = Dmod_Malloc(path_length + 1);
@@ -864,10 +868,11 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
     ctx->worker_refs = 0;
     ctx->stopping = false;
     ctx->workers_idle = dmosi_semaphore_create(0, 1);
-    if (ctx->config_path == NULL || ctx->drivers == NULL || ctx->workers_idle == NULL)
+    if (ctx->sources == NULL || ctx->config_path == NULL || ctx->drivers == NULL || ctx->workers_idle == NULL)
     {
         if (ctx->workers_idle != NULL) dmosi_semaphore_destroy(ctx->workers_idle);
         if (ctx->drivers != NULL) dmlist_destroy(ctx->drivers);
+        if (ctx->sources != NULL) dmlist_destroy(ctx->sources);
         Dmod_Free(ctx->config_path);
         Dmod_Free(ctx);
         return NULL;
@@ -945,8 +950,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _deinit, (dmfsi_context_t ctx
 
     dmosi_mutex_lock(g_devfs_mutex);
     bool busy = ctx->directory_refs != 0;
-    for (config_source_t* source = ctx->sources; source; source = source->next)
-        busy |= source->refs != 0;
+    for (size_t i = 0; i < dmlist_size(ctx->sources); ++i)
+        busy |= ((config_source_t*)dmlist_get(ctx->sources, i))->refs != 0;
     for (size_t i = 0; i < dmlist_size(ctx->drivers); ++i)
         busy |= ((driver_node_t*)dmlist_get(ctx->drivers, i))->open_count != 0;
     if (!busy)
@@ -1018,7 +1023,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
     if(handle == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for file handle\n");
-        release_driver_node_ref(driver_node);
+        release_driver_node_ref(ctx, driver_node);
         return DMFSI_ERR_GENERAL;
     }
     memset(handle, 0, sizeof(*handle));
@@ -1037,7 +1042,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         {
             DMOD_LOG_ERROR("Driver does not implement dmdrvi_open\n");
             Dmod_Free(handle);
-            release_driver_node_ref(driver_node);
+            release_driver_node_ref(ctx, driver_node);
             return DMFSI_ERR_NOT_FOUND;
         }
 
@@ -1048,7 +1053,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
         {
             DMOD_LOG_ERROR("Driver failed to open device: %s\n", path);
             Dmod_Free(handle);
-            release_driver_node_ref(driver_node);
+            release_driver_node_ref(ctx, driver_node);
             return DMFSI_ERR_GENERAL;
         }
         handle->dmdrvi_read  = Dmod_GetDifFunction(driver_node->driver, dmod_dmdrvi_read_sig);
@@ -1102,7 +1107,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fclose, (dmfsi_context_t ctx
     dmosi_mutex_lock(g_devfs_mutex);
     bool reap = handle->driver->source != NULL && handle->driver->source->removed;
     dmosi_mutex_unlock(g_devfs_mutex);
-    release_driver_node_ref(handle->driver);
+    release_driver_node_ref(ctx, handle->driver);
     if (reap) queue_source_reap(ctx);
 
     // Free the path string that was duplicated in fopen
@@ -1571,7 +1576,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _closedir, (dmfsi_context_t c
     {
         driver_node_t* node = dmlist_get(dir_node->snapshot, i);
         reap |= source_is_removed(node);
-        release_driver_node_ref(node);
+        release_driver_node_ref(ctx, node);
     }
     dmlist_destroy(dir_node->snapshot);
     if (reap) queue_source_reap(ctx);
@@ -1793,7 +1798,7 @@ dmod_dmfsi_dif_api_declaration( 2.0, dmdevfs, int, _stat, (dmfsi_context_t ctx, 
     dmdrvi_stat_t driver_stat_buf;
     int res = driver_stat(driver_node, path, &driver_stat_buf);
     bool reap = source_is_removed(driver_node);
-    release_driver_node_ref(driver_node);
+    release_driver_node_ref(ctx, driver_node);
     if (reap) queue_source_reap(ctx);
     if (res != 0)
     {
@@ -2064,9 +2069,7 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     }
 
     DMOD_LOG_STEP_PROGRESS(75, "Creating driver context: %s\n", driver_name);
-    driver_node->source_retired = false;
     driver_node->source = NULL;
-    driver_node->retired_next = NULL;
     driver_node->was_loaded = was_loaded;
     driver_node->was_enabled = was_enabled;
     driver_node->is_dynamic = false;
@@ -2176,9 +2179,13 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     DMOD_LOG_STEP(0, "Configured driver: %s (path: %s)\n", driver_name, driver_node->path);
 
     dmosi_mutex_lock(g_devfs_mutex);
-    driver_node->owner_next = g_driver_owners;
-    g_driver_owners = driver_node;
+    bool registered = dmlist_push_back(g_driver_owners, driver_node);
     dmosi_mutex_unlock(g_devfs_mutex);
+    if (!registered)
+    {
+        destroy_configured_node(driver_node);
+        return NULL;
+    }
     return driver_node;
 }
 
@@ -3014,9 +3021,9 @@ static int compare_driver_directory( const void* data, const void* user_data )
 {
     const driver_node_t* node = (const driver_node_t*)data;
     const char* path = (const char*)user_data;
-    if (node == NULL || path == NULL)
+    if (node == NULL || path == NULL || node->removed)
     {
-        return 0;
+        return -1;
     }
 
     char parent_dir[MAX_PATH_LENGTH] = {0};
@@ -3061,9 +3068,9 @@ static int compare_driver_node_path( const void* data, const void* user_data )
 {
     const driver_node_t* node = (const driver_node_t*)data;
     const char* path = (const char*)user_data;
-    if (node == NULL || path == NULL)
+    if (node == NULL || path == NULL || node->removed)
     {
-        return 0;
+        return -1;
     }
 
     return strcmp(node->path, path);
@@ -3168,7 +3175,7 @@ static driver_node_t* find_and_ref_driver_node( dmfsi_context_t ctx, const char*
  * @param node Node to release, or NULL (a no-op, for callers that may not
  *             have obtained one)
  */
-static void release_driver_node_ref( driver_node_t* node )
+static void release_driver_node_ref( dmfsi_context_t ctx, driver_node_t* node )
 {
     if (node == NULL)
     {
@@ -3178,9 +3185,10 @@ static void release_driver_node_ref( driver_node_t* node )
     dmosi_mutex_lock(g_devfs_mutex);
     node->open_count--;
     if (node->source != NULL) --node->source->refs;
-    // Source-retired nodes stay in its intrusive list until all handles close.
+    // Detached hot-plug nodes can be freed now. Source-removed nodes stay
+    // in the mount's driver list until every reference to that source closes.
     bool free_now = node->removed && node->open_count == 0 &&
-                    !node->source_retired;
+                    dmlist_find(ctx->drivers, node, compare_driver) == NULL;
     dmosi_mutex_unlock(g_devfs_mutex);
 
     if (free_now)
@@ -3269,7 +3277,7 @@ static bool dev_num_equal( const dmdrvi_dev_num_t* a, const dmdrvi_dev_num_t* b 
 static int compare_driver_context( const void* data, const void* user_data )
 {
     const driver_node_t* node = (const driver_node_t*)data;
-    if (node == NULL || user_data == NULL || node->is_partition)
+    if (node == NULL || user_data == NULL || node->removed || node->is_partition)
     {
         return -1;
     }
@@ -3284,7 +3292,7 @@ static int compare_dynamic_device( const void* data, const void* user_data )
 {
     const driver_node_t* node = (const driver_node_t*)data;
     const dynamic_device_lookup_t* lookup = (const dynamic_device_lookup_t*)user_data;
-    if (node == NULL || lookup == NULL || !node->is_dynamic)
+    if (node == NULL || lookup == NULL || node->removed || !node->is_dynamic)
     {
         return -1;
     }
@@ -4148,7 +4156,7 @@ static int compare_partition_of( const void* data, const void* user_data )
 {
     const driver_node_t* node = (const driver_node_t*)data;
     const dynamic_device_lookup_t* lookup = (const dynamic_device_lookup_t*)user_data;
-    if (node == NULL || lookup == NULL || !node->is_partition || node->driver_context != lookup->context)
+    if (node == NULL || lookup == NULL || node->removed || !node->is_partition || node->driver_context != lookup->context)
     {
         return -1;
     }
@@ -4174,6 +4182,7 @@ static void remove_partitions_of( dmfsi_context_t mount, const dynamic_device_lo
             dmlist_remove(mount->drivers, partition, compare_driver);
             partition->removed = true;
             partition->open_count++;    // Keep it alive across the unlocked report below.
+            if (partition->source != NULL) ++partition->source->refs;
         }
         dmosi_mutex_unlock(g_devfs_mutex);
 
@@ -4183,7 +4192,7 @@ static void remove_partitions_of( dmfsi_context_t mount, const dynamic_device_lo
         }
         report_node_removed(partition);
         DMOD_LOG_INFO("Partition no longer available: %s\n", partition->path);
-        release_driver_node_ref(partition);
+        release_driver_node_ref(mount, partition);
     }
 }
 
@@ -4555,10 +4564,7 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
         return;
     }
 
-    new_node->owner_next = NULL;
-    new_node->source_retired = false;
     new_node->source = owner_source;
-    new_node->retired_next = NULL;
     new_node->driver_context = owner_context;
     new_node->driver = owner_driver;
     new_node->dev_num = *dev_num;
@@ -4666,6 +4672,7 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
      * to the last matching _fclose() closes that window. */
     node->removed = true;
     node->open_count++; // Keep metadata alive across the unlocked callbacks below.
+    if (node->source != NULL) ++node->source->refs;
 
     dmosi_mutex_unlock(g_devfs_mutex);
 
@@ -4679,7 +4686,7 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
     notify_friends_about_node(mount, node, dmdrvi_dev_state_dead);
     report_node_removed(node);
 
-    release_driver_node_ref(node);
+    release_driver_node_ref(mount, node);
     DMOD_LOG_INFO("Hot-plugged device no longer available: %s\n", removed_path);
     release_worker_mount(mount);
 }
