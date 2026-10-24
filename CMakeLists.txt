@@ -1,25 +1,16 @@
-# =====================================================================
-#               DMOD Driver File System Module
-# =====================================================================
 cmake_minimum_required(VERSION 3.18)
 
-# ======================================================================
-#               For VS Code
-# ======================================================================
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ======================================================================
-#               DMOD DFS
-# ======================================================================
-# Allow version to be passed as a parameter, default to 0.1
 if(NOT DEFINED DMOD_MODULE_VERSION)
     set(DMOD_MODULE_VERSION "0.1" CACHE STRING "DMOD module version")
 endif()
-set(DMOD_MODE "DMOD_MODULE" CACHE STRING "DMOD build mode")
 
-# ======================================================================
-#               Fetch DMOD repository
-# ======================================================================
+# If a local dmod checkout is provided, use it instead of fetching from git
+if(DEFINED DMOD_DIR AND NOT "${DMOD_DIR}" STREQUAL "")
+    set(FETCHCONTENT_SOURCE_DIR_DMOD "${DMOD_DIR}" CACHE PATH "" FORCE)
+endif()
+
 include(FetchContent)
 FetchContent_Declare(
     dmod
@@ -27,9 +18,6 @@ FetchContent_Declare(
     GIT_TAG        develop
 )
 
-# ======================================================================
-#               DMOD Configuration
-# ======================================================================
 set(DMOD_MODE "DMOD_MODULE" CACHE STRING "DMOD build mode")
 set(DMOD_BUILD_TESTS OFF CACHE BOOL "Build tests")
 set(DMOD_BUILD_EXAMPLES OFF CACHE BOOL "Build examples")
@@ -38,37 +26,32 @@ set(DMOD_BUILD_TEMPLATES OFF CACHE BOOL "Build templates")
 
 FetchContent_MakeAvailable(dmod)
 
-project(dmdevfs
-    VERSION ${DMOD_MODULE_VERSION}
-    DESCRIPTION "DMOD Driver File System"
+project(dmdevfs VERSION ${DMOD_MODULE_VERSION}
+    DESCRIPTION "dmdevfs DMOD library module"
     LANGUAGES C CXX)
 
-
-# ======================================================================
-#               Import dmod functions and macros
-# ======================================================================
 set(DMOD_DIR ${dmod_SOURCE_DIR} CACHE PATH "DMOD source directory")
+set(DMOD_SCRIPTS_DIR ${DMOD_DIR}/scripts CACHE PATH "DMOD scripts directory")
 include(${DMOD_DIR}/paths.cmake)
 dmod_setup_external_module()
 
-# ======================================================================
-#               DMDEVFS Module Configuration
-# ======================================================================
-# Name of the module 
+# Name of the module
 set(DMOD_MODULE_NAME        dmdevfs)
 
-# Version is already set above and used in project()
-# No need to set it again here
-
 # Author (should be string)
-set(DMOD_AUTHOR_NAME        Patryk Kubiak)
+set(DMOD_AUTHOR_NAME        "Patryk Kubiak")
 
 # Stack size for the module (should be integer)
 set(DMOD_STACK_SIZE         1024)
 
-# dmdevfs implements dmdrvi's Module Abstraction Layer (dmdrvi_device_available /
-# dmdrvi_device_unavailable) so drivers can announce hot-plugged sub-devices.
-set(DMOD_MAL_IMPLS         dmdrvi)
+# Path to the .dmr file - enables release package creation in build/packages/
+set(DMOD_DMR_PATH           ${CMAKE_CURRENT_SOURCE_DIR}/dmdevfs.dmr)
+
+# List of MAL interfaces implemented by this module (leave empty if none)
+set(DMOD_MAL_IMPLS          )
+
+# List of DIF interfaces implemented by this module (leave empty if none)
+set(DMOD_DIF_IMPLS          )
 
 #
 #   dmod_add_library - create a library module
@@ -81,41 +64,17 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmdevfs.c
 )
 
-# Link to other DMOD modules (will be downloaded on build time)
-# dmdrvi 2.6: DMDRVI_IOCTL_MONITOR_* / _GFX_* / _INPUT_* / _AUDIO_* (node
-# reporting; _AUDIO_* since 2.6) and
-# DMDRVI_IOCTL_DEVFS_GET_FRIEND (answered by dmdevfs itself), see
-# src/dmdevfs.c.
-# libsystemd: nodes are reported as "monitor"/"block"/"display"/"input"/"audio"
-# devices so device rules can start services (dmdevmon, automount, dmview)
-# for them.
-dmod_link_modules(${DMOD_MODULE_NAME}
-    dmfsi
-    dmdrvi
-    dmini
-    dmlist
-    dmosi
-    dmpart
-    libsystemd
-)
-
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# ======================================================================
-#               Services
-# ======================================================================
-# dmdevmon - generic monitor service for nodes implementing the dmdrvi
-# monitor contract (reported to libsystemd as class "monitor", see above).
-add_subdirectory(services/dmdevmon)
+target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
-# ======================================================================
-#               Tests
-# ======================================================================
-option(DMDEVFS_BUILD_TESTS "Build tests" OFF)
-
-if(DMDEVFS_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
-endif()
+# To depend on another module's headers, use:
+#   dmod_link_modules(${DMOD_MODULE_NAME}
+#       other_module@1.0
+#   )
+enable_testing()
+add_subdirectory(tests)

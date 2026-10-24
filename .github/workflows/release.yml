@@ -3,9 +3,6 @@ name: Release
 on:
   release:
     types: [created]
-  push:
-    tags:
-      - 'v*'
 
 jobs:
   discover-architectures:
@@ -20,24 +17,28 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Fetch dmod to discover architectures
         run: |
-          mkdir -p build_discovery
-          cd build_discovery
-          cmake .. -DDMOD_MODE=DMOD_MODULE
-      
+          # A plain `git clone` here (rather than configuring dmdevfs's
+          # own CMakeLists.txt via FetchContent, as before) so this step only
+          # ever depends on dmod itself - not on dmdevfs's
+          # dmod_link_modules() fetches of other modules, which this step has
+          # no business needing just to list dmod's supported architectures,
+          # and which previously made this discovery job (and therefore the
+          # whole release) fail outright whenever any of those unrelated
+          # external fetches hiccuped.
+          git clone --depth 1 https://github.com/choco-technologies/dmod.git dmod_discovery
+
       - name: List available architectures
         id: list-archs
         run: |
-          DMOD_SRC_DIR=$(find build_discovery -path "*/_deps/dmod-src" -type d | head -1)
-          
           # create JSON array
-          ARCHS=$(find ${DMOD_SRC_DIR}/configs/arch -name "tools-cfg.cmake" | \
-            sed "s|${DMOD_SRC_DIR}/configs/arch/||g" | \
+          ARCHS=$(find dmod_discovery/configs/arch -name "tools-cfg.cmake" | \
+            sed "s|dmod_discovery/configs/arch/||g" | \
             sed 's|/tools-cfg.cmake||g' | \
             jq -R -s -c 'split("\n") | map(select(length > 0))')
-          
+
           echo "Found architectures: $ARCHS"
           echo "architectures=$ARCHS" >> $GITHUB_OUTPUT
 
@@ -50,23 +51,23 @@ jobs:
     strategy:
       matrix:
         arch_name: ${{ fromJson(needs.discover-architectures.outputs.architectures) }}
-    
+
     container:
       image: chocotechnologies/dmod:1.0.4
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Extract version from tag
         id: get_version
         run: |
           # Extract version from tag (e.g., v1.2 -> 1.2)
-          VERSION="${{ github.event.release.tag_name || github.ref_name }}"
+          VERSION="${{ github.event.release.tag_name }}"
           VERSION="${VERSION#v}"  # Remove 'v' prefix if present
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Extracted version: $VERSION"
-      
+
       - name: Build dmdevfs for ${{ matrix.arch_name }}
         run: |
           set -e
@@ -75,124 +76,107 @@ jobs:
           echo "ARTIFACT_NAME=release-$ARCH_DIR_NAME" >> $GITHUB_ENV
           mkdir -p build_$ARCH_DIR_NAME
           cd build_$ARCH_DIR_NAME
-          
-          # First run cmake to fetch dependencies with version from tag
-          cmake .. -DDMOD_TOOLS_NAME=arch/${{ matrix.arch_name }} -DDMOD_MODULE_VERSION="${{ steps.get_version.outputs.version }}"
-          
-          # Build the modules
-          cmake --build .
-          
-          echo "Build completed for ${{ matrix.arch_name }}"
-          ls -la dmf/
-          ls -la dmfc/
-      
-      - name: Prepare release package
-        run: |
-          set -e
-          mkdir -p release_package
-          BUILD_DIR=build_$ARCH_DIR_NAME
-          DMF_DIR="$BUILD_DIR/dmf"
-          DMFC_DIR="$BUILD_DIR/dmfc"
-          
-          cp $DMF_DIR/dmdevfs.dmf release_package/
-          cp $DMF_DIR/dmdevfs_version.txt release_package/
-          cp $DMFC_DIR/dmdevfs.dmfc release_package/
-          # Copy .dmd file if it exists
-          if [ -f $DMF_DIR/dmdevfs.dmd ]; then
-            cp $DMF_DIR/dmdevfs.dmd release_package/
-          fi
-                    
-          # Copy documentation and license
-          cp README.md release_package/
-          cp LICENSE release_package/
-          
-          # Create release notes file from GitHub release
-          echo "${{ github.event.release.body }}" > release_package/RELEASE_NOTES.txt
-          
-          echo "Package contents:"
-          ls -la release_package/
-      
-      - name: Create release archive
-        run: |
-          cd release_package
-          zip -r ../dmdevfs-${{ github.event.release.tag_name || github.ref_name }}-$ARCH_DIR_NAME.zip .
-          cd ..
-          echo "Created archive:"
-          ls -lh dmdevfs-*.zip
 
-      - name: Create dmdevmon archive
+          # DMOD_DMR_PATH is already set in CMakeLists.txt, so this build also
+          # assembles build_$ARCH_DIR_NAME/packages/<module>/ for every module
+          # defined in this repo's CMake config - nothing left to do here but
+          # discover whatever got packaged, add release notes, and zip it.
+          cmake .. -DDMOD_TOOLS_NAME=arch/${{ matrix.arch_name }} -DDMOD_MODULE_VERSION="${{ steps.get_version.outputs.version }}"
+          cmake --build .
+
+          echo "Build completed for ${{ matrix.arch_name }}"
+          ls -la packages/
+
+      - name: Add release notes and create release archives
         run: |
           set -e
-          # dmdevmon (services/dmdevmon) is packaged by the build itself from
-          # its dmdevmon.dmr: module, docs and the libsystemd rule/unit.
-          PKG_DIR=build_$ARCH_DIR_NAME/packages/dmdevmon
-          test -d "$PKG_DIR"
-          (cd "$PKG_DIR" && zip -r "${OLDPWD}/dmdevmon-${{ github.event.release.tag_name || github.ref_name }}-$ARCH_DIR_NAME.zip" .)
-          ls -lh dmdevmon-*.zip
-      
+          BUILD_DIR="build_$ARCH_DIR_NAME"
+          TAG="${{ github.event.release.tag_name }}"
+          PACKAGES_DIR="$BUILD_DIR/packages"
+
+          if [ ! -d "$PACKAGES_DIR" ] || [ -z "$(ls -A "$PACKAGES_DIR")" ]; then
+            echo "Error: no packages found in $PACKAGES_DIR"
+            exit 1
+          fi
+
+          # A repo may define more than one module (e.g. a core + port split,
+          # or several independent modules) - package every subdirectory
+          # found under packages/, not just dmdevfs.
+          : > package-names.txt
+          for pkg_dir in "$PACKAGES_DIR"/*/; do
+            pkg=$(basename "$pkg_dir")
+            echo "$pkg" >> package-names.txt
+
+            echo "${{ github.event.release.body }}" > "${pkg_dir}RELEASE_NOTES.txt"
+            (cd "$pkg_dir" && zip -r "${OLDPWD}/${pkg}-${TAG}-${ARCH_DIR_NAME}.zip" .)
+          done
+
+          echo "Created archives:"
+          ls -lh *-"${TAG}"-"${ARCH_DIR_NAME}".zip
+          echo "Packages found:"
+          cat package-names.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: |
-            dmdevfs-${{ github.event.release.tag_name || github.ref_name }}-*.zip
-            dmdevmon-${{ github.event.release.tag_name || github.ref_name }}-*.zip
+            *.zip
+            package-names.txt
           retention-days: 1
 
   generate-versions-manifest:
     name: Generate versions.dmm
-    needs: discover-architectures
+    needs: [discover-architectures, build-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Fetch all history to get all tags
-      
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Generate versions.dmm
         run: |
           set -e
           echo "# List of available versions for dmdevfs modules" > versions.dmm
           echo "# Generated automatically by CI" >> versions.dmm
           echo "" >> versions.dmm
-          
+
           # Get all version tags (starting with 'v') and extract version numbers
           VERSIONS=$(git tag -l 'v*' | sed 's/^v//' | sort -V | tr '\n' ' ' | sed 's/ $//')
-          
+
           # Remove vlatest from the list if present
           VERSIONS=$(echo $VERSIONS | sed 's/\blatest\b//g' | xargs)
 
           if [ -z "$VERSIONS" ]; then
             echo "Warning: No version tags found"
-            VERSIONS="${{ github.event.release.tag_name || github.ref_name }}"
+            VERSIONS="${{ github.event.release.tag_name }}"
             VERSIONS="${VERSIONS#v}"
           fi
-          
-          echo "Found versions: $VERSIONS"
-          
-          # Add $version-available directive for dmdevfs module
-          echo "\$version-available dmdevfs $VERSIONS" >> versions.dmm
 
-          # dmdevmon only exists from the release that added services/dmdevmon
-          DMDEVMON_VERSIONS=""
-          for VERSION in $VERSIONS; do
-            if git cat-file -e "v$VERSION:services/dmdevmon/CMakeLists.txt" 2>/dev/null; then
-              DMDEVMON_VERSIONS="$DMDEVMON_VERSIONS $VERSION"
-            fi
+          echo "Found versions: $VERSIONS"
+
+          # Union of package names discovered across every architecture build
+          # (the same set is expected everywhere, but union is safe even if
+          # some packages only exist for a subset of architectures).
+          PACKAGES=$(cat artifacts/release-*/package-names.txt | sort -u)
+          echo "Found packages: $PACKAGES"
+
+          for pkg in $PACKAGES; do
+            echo "\$version-available $pkg $VERSIONS" >> versions.dmm
           done
-          CURRENT="${{ github.event.release.tag_name || github.ref_name }}"
-          CURRENT="${CURRENT#v}"
-          if ! echo " $DMDEVMON_VERSIONS " | grep -q " $CURRENT "; then
-            DMDEVMON_VERSIONS="$DMDEVMON_VERSIONS $CURRENT"
-          fi
-          echo "\$version-available dmdevmon $(echo $DMDEVMON_VERSIONS | xargs)" >> versions.dmm
-          
+
           echo "Generated versions.dmm:"
           cat versions.dmm
-      
+
       - name: Upload versions.dmm as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -206,33 +190,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      
+
       - name: Display artifact structure
         run: |
           echo "Downloaded artifacts:"
           ls -lR artifacts/
-      
-      - name: Create GitHub Release if triggered by tag push
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${{ github.event.release.tag_name || github.ref_name }}"
-          if ! gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1; then
-            echo "No release found for tag $TAG, creating one..."
-            gh release create "$TAG" \
-              --repo ${{ github.repository }} \
-              --title "Release $TAG" \
-              --notes "Release $TAG"
-          else
-            echo "Release for tag $TAG already exists, skipping creation."
-          fi
 
       - name: Upload release assets to versioned tag
         shell: bash
@@ -240,54 +208,49 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          # Upload all release archives to the GitHub release
           shopt -s nullglob
           zip_files=(artifacts/release-*/*.zip)
-          
+
           if [ ${#zip_files[@]} -eq 0 ]; then
             echo "Error: No artifacts found to upload"
             exit 1
           fi
-          
+
           for zip_file in "${zip_files[@]}"; do
-            echo "Uploading $zip_file to ${{ github.event.release.tag_name || github.ref_name }}..."
-            gh release upload ${{ github.event.release.tag_name || github.ref_name }} \
+            echo "Uploading $zip_file to ${{ github.event.release.tag_name }}..."
+            gh release upload ${{ github.event.release.tag_name }} \
               "$zip_file" \
               --repo ${{ github.repository }} \
               --clobber
           done
-          
-          # Upload versions.dmm to the versioned release
+
           if [ -f artifacts/versions-manifest/versions.dmm ]; then
-            echo "Uploading versions.dmm to ${{ github.event.release.tag_name || github.ref_name }}..."
-            gh release upload ${{ github.event.release.tag_name || github.ref_name }} \
+            echo "Uploading versions.dmm to ${{ github.event.release.tag_name }}..."
+            gh release upload ${{ github.event.release.tag_name }} \
               artifacts/versions-manifest/versions.dmm \
               --repo ${{ github.repository }} \
               --clobber
           fi
-          
-          echo "Successfully uploaded ${#zip_files[@]} artifact(s) to ${{ github.event.release.tag_name || github.ref_name }}"
-      
+
+          echo "Successfully uploaded ${#zip_files[@]} artifact(s) to ${{ github.event.release.tag_name }}"
+
       - name: Create or update latest release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          
-          # Check if vlatest release exists
           if gh release view vlatest --repo ${{ github.repository }} >/dev/null 2>&1; then
             echo "Release vlatest exists, deleting it..."
             gh release delete vlatest --repo ${{ github.repository }} --yes
           fi
-          
-          # Create new vlatest release
+
           echo "Creating vlatest release..."
           gh release create vlatest \
             --repo ${{ github.repository }} \
-            --title "Latest Release (based on ${{ github.event.release.tag_name || github.ref_name }})" \
-            --notes "This release always points to the latest stable version. Currently based on ${{ github.event.release.tag_name || github.ref_name }}."
-      
+            --title "Latest Release (based on ${{ github.event.release.tag_name }})" \
+            --notes "This release always points to the latest stable version. Currently based on ${{ github.event.release.tag_name }}."
+
       - name: Upload release assets to latest tag
         shell: bash
         env:
@@ -296,7 +259,7 @@ jobs:
           set -e
           shopt -s nullglob
           zip_files=(artifacts/release-*/*.zip)
-          
+
           for zip_file in "${zip_files[@]}"; do
             echo "Uploading $zip_file to vlatest..."
             gh release upload vlatest \
@@ -304,8 +267,7 @@ jobs:
               --repo ${{ github.repository }} \
               --clobber
           done
-          
-          # Upload versions.dmm to the latest release
+
           if [ -f artifacts/versions-manifest/versions.dmm ]; then
             echo "Uploading versions.dmm to vlatest..."
             gh release upload vlatest \
@@ -313,5 +275,5 @@ jobs:
               --repo ${{ github.repository }} \
               --clobber
           fi
-          
+
           echo "Successfully uploaded ${#zip_files[@]} artifact(s) to vlatest"

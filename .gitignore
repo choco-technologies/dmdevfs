@@ -1,13 +1,12 @@
 # Build directories
 build/
-build_*/
-_codeql_build_dir/
-_codeql_detected_source_root
 *.dmf
 *.dmfc
 
 # IDE
-.vscode/
+# .vscode/tasks.json and .vscode/settings.json are committed (see every real
+# module repo) so the build tasks are shared with the team - don't ignore
+# .vscode/ wholesale.
 .idea/
 
 # Temporary files

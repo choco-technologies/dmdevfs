@@ -1,9 +1,5 @@
 # Include dynamically generated versions list from latest release
-$include https://github.com/choco-technologies/dmdfs/releases/download/vlatest/versions.dmm
+$include https://github.com/choco-technologies/dmdevfs/releases/download/vlatest/versions.dmm
 
-# Module entries with version placeholder - will be expanded by $version-available
-dmdevfs https://github.com/choco-technologies/dmdfs/releases/download/v<version>/dmdevfs-v<version>-<arch_name>.zip
-
-# dmdevmon - monitor service Application (services/dmdevmon), built and
-# released together with dmdevfs
-dmdevmon https://github.com/choco-technologies/dmdfs/releases/download/v<version>/dmdevmon-v<version>-<arch_name>.zip
+# Module entry with version placeholder - expanded by $version-available
+dmdevfs https://github.com/choco-technologies/dmdevfs/releases/download/v<version>/dmdevfs-v<version>-<arch_name>.zip

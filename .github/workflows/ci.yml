@@ -2,39 +2,41 @@ name: CI
 
 on:
   push:
-    branches: [ master, main, develop ]
+    branches: [ main, master, develop ]
   pull_request:
-    branches: [ master, main, develop, feature/**, copilot/** ]
+    branches: [ main, master, develop ]
 
 jobs:
-  build:
-    name: Build
+  build-and-test:
+    name: Build and Test
     runs-on: ubuntu-latest
     permissions:
       contents: read
     container:
       image: chocotechnologies/dmod:1.0.4
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Build dmdevfs project
+
+      - name: Build dmdevfs
         run: |
           mkdir -p build
           cd build
           cmake .. -DDMOD_MODE=DMOD_MODULE
           cmake --build .
-      
-      - name: Verify build artifacts
+
+      - name: Verify module files
         run: |
-          echo "Build completed successfully"
+          echo "Checking for module files..."
           ls -lh build/dmf/
-      
-      - name: Build and test
+          test -f build/dmf/dmdevfs.dmf
+          test -f build/dmf/dmdevfs_version.txt
+          test -f build/dmf/test_dmdevfs.dmf
+          echo "Module files present"
+
+      - name: Run tests with dmod_loader
         run: |
-          mkdir -p build_tests
-          cd build_tests
-          cmake .. -DDMOD_MODE=DMOD_MODULE -DDMDEVFS_BUILD_TESTS=ON
-          cmake --build .
-          ctest --output-on-failure --verbose
+          export DMOD_DMF_DIR=$(pwd)/build/dmf
+          dmf-get install -d ${DMOD_DMF_DIR}/test_dmdevfs-local.dmd -y
+          dmod_loader build/dmf/test_dmdevfs.dmf
