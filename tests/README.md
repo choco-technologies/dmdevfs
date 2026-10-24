@@ -95,6 +95,19 @@ writes MBR/GPT images into it sector by sector
 table. The reporting step loads `fixtures/units` and `fixtures/rules`, and
 `fixtures/norules` (an empty rules directory) at the end to drop them again.
 
+### test_runtime_sources - dynamic configuration directories
+
+`test_runtime_sources.c` exercises ADD/REMOVE through the mount's built-in
+`null` node. It checks independent trees, nested multi-driver INI files,
+normalization and rejected paths, rollback after a driver failure or node
+collision, repeated add/remove cycles, removal of the boot source while a
+shared driver remains active, and removal after the source files disappear.
+It also covers hot-plug children and partitions, open file handles (including
+an already-unplugged child), directory handles retained across removal, and
+re-adding a source while its previous handles remain open.
+Fixtures live in `fixtures/runtime`. One test creates and removes its own
+`runtime-temporary` directory in the test working directory.
+
 ## Test Coverage
 
 Current automated tests verify:

@@ -186,3 +186,12 @@ message(STATUS "DMDEVFS tests configured")
 message(STATUS "  Module output directory: ${CMAKE_BINARY_DIR}/dmf")
 message(STATUS "  Run 'ctest' to verify the build")
 message(STATUS "  Note: Full integration tests require dmf-get tool and device drivers")
+
+# Dynamic configuration trees on an existing mount.
+set(DMOD_MODULE_NAME test_runtime_sources)
+dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION} test_runtime_sources.c)
+target_include_directories(${DMOD_MODULE_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/mockdrv
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+dmod_link_modules(${DMOD_MODULE_NAME} dmfsi dmosi)
+dmdevfs_register_test(${DMOD_MODULE_NAME})
