@@ -7,3 +7,7 @@ dmdevfs https://github.com/choco-technologies/dmdfs/releases/download/v<version>
 # dmdevmon - monitor service Application (services/dmdevmon), built and
 # released together with dmdevfs
 dmdevmon https://github.com/choco-technologies/dmdfs/releases/download/v<version>/dmdevmon-v<version>-<arch_name>.zip
+
+# mountcfg - configuration directories of mount points (services/mountcfg),
+# built and released together with dmdevfs
+mountcfg https://github.com/choco-technologies/dmdfs/releases/download/v<version>/mountcfg-v<version>-<arch_name>.zip

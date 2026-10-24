@@ -339,6 +339,28 @@ DMDEVFS supports both flat and hierarchical configuration layouts:
 
 The hierarchical structure is useful for organizing drivers by type or bus.
 
+### Configuration Directories of Mount Points
+
+Every mounted file system may bring driver configurations of its own, in
+`<mount point>/cfg/drivers` - the same layout as the directory the mount is
+configured from (`/cfg/drivers` on dmod-boot). `dmdevfs_add_config_dir(mount_point)`
+(`include/dmdevfs_cfg.h`) configures them in every dmdevfs mount, exactly as if
+they were in its own directory: ordered by `driver_order` and their
+dependencies, reported to libsystemd, their partitions exposed.
+`dmdevfs_remove_config_dir(mount_point)` removes them again - every node, its
+partitions and hot-plugged devices first, is reported removed (the services
+started for it stop) and the driver is freed (`dmdrvi_free()`, its module
+released) once the last handle open on any of its nodes is closed. The
+directory of the mount's own configuration is never configured twice.
+
+Both only queue the work for the hot-plug thread, which handles it in order
+with hot-plug events, and return at once.
+
+On dmod-boot the module that follows mounts - [mountcfg](services/mountcfg/README.md),
+started by its `type=library` unit - calls them for every mount and unmount,
+together with libsystemd's `libsystemd_add_config_dir()` for the units and
+rules of the same directory. dmdevfs itself does not depend on dmvfs.
+
 ### Example Configuration Files
 
 #### Example 1: SPI Flash Driver
