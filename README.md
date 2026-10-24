@@ -135,6 +135,49 @@ the whole string as the path - a platform that passes a secret needs this versio
 
 DMDEVFS uses configuration files to define and initialize device drivers. This is a critical mechanism that allows the filesystem to dynamically discover and configure hardware drivers at mount time.
 
+### Runtime configuration sources
+
+An existing mount accepts additional configuration directories through
+`DMDEVFS_IOCTL_ADD_CONFIG` and removes them through
+`DMDEVFS_IOCTL_REMOVE_CONFIG` (declared in `dmdevfs.h`). Pass a directory path
+as the ioctl argument, using a file handle from that mount; its built-in
+`null` node is a convenient stable control handle:
+
+```c
+void* control = Dmod_FileOpen("/dev/null", "r+");
+Dmod_Ioctl(control, DMDEVFS_IOCTL_ADD_CONFIG, "/ext/cfg/drivers");
+Dmod_Ioctl(control, DMDEVFS_IOCTL_ADD_CONFIG, "/mnt/SD/cfg/drivers");
+// The media may already be absent: removal does not read its files.
+Dmod_Ioctl(control, DMDEVFS_IOCTL_REMOVE_CONFIG, "/mnt/SD/cfg/drivers");
+Dmod_FileClose(control);
+```
+
+The directory given at mount and all added directories coexist. Each node,
+including hot-plug children and partitions, belongs to its source tree.
+Removal withdraws only that tree's nodes, reports their disappearance to
+libsystemd and their friends, and preserves the other trees and the mount.
+Existing handles from the removed tree fail read/write/ioctl/flush operations
+with `-ENODEV`; they can still be closed. Driver contexts and modules stay
+alive until the last retained reference is released. Open directory handles
+retain a snapshot of nodes and skip withdrawn entries; close them to release
+those references. The mount itself refuses teardown
+with `-EBUSY` while handles remain open.
+
+Commands complete synchronously, serialized with hot-plug events. Call them
+from an application thread, not synchronously from a driver or service
+callback invoked by the dmdevfs worker. An ADD failure rolls back that
+source's new nodes; it leaves existing trees registered. Boot configuration
+keeps its historical best-effort behavior for individual driver failures.
+
+Use absolute paths. Repeated slashes, `.` components and trailing slashes are
+normalized; `..` is rejected. Duplicate active sources return `-EEXIST`,
+overlapping source directories return `-EINVAL`, unknown removals return
+`-ENOENT`, and discovery/configuration failures return `-EIO`. A device-path
+collision also fails the new source. A removed source can be added again.
+The existing configuration-file path length limit still applies. This API
+manages explicitly supplied sources; media detection and deciding when to
+add/remove them remain the caller's responsibility.
+
 ### Overview
 
 When DMDEVFS is mounted with a configuration path, it:

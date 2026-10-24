@@ -11,6 +11,21 @@
 extern "C" {
 #endif
 
+/** Runtime configuration-tree management. Pass a NUL-terminated directory
+ * path as arg to ioctl on any node of the target mount (prefer /dev/null).
+ * Calls are synchronous and run in FIFO order with hot-plug work. Do not
+ * call synchronously from a driver/service callback invoked by that worker.
+ * Paths are matched lexically, with repeated slashes and '.' normalized;
+ * '..' components are rejected. Use absolute paths in applications.
+ * ADD rejects duplicate/overlapping active trees and rolls back new nodes
+ * on failure. REMOVE needs no access to the source files, withdraws only
+ * its nodes and invalidates their handles (close remains valid). Driver
+ * contexts are reclaimed after the last file/directory reference is released. Returns 0 or a
+ * negative errno (EEXIST, EINVAL, ENOENT, EIO, ENOMEM, ENODEV, EDEADLK).
+ */
+#define DMDEVFS_IOCTL_ADD_CONFIG     0xF01
+#define DMDEVFS_IOCTL_REMOVE_CONFIG  0xF02
+
 // Module version
 #define DMDEVFS_VERSION_MAJOR 0
 #define DMDEVFS_VERSION_MINOR 2
