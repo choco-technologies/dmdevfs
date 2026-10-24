@@ -12,7 +12,7 @@
 /**
  * @brief stores driver order. Smaller number are configured first
  */
-typedef int32_t     driver_order_t;
+typedef int32_t     device_order_t;
 
 /**
  * @brief type for storing File System context
@@ -49,10 +49,11 @@ typedef struct driver
 typedef struct device_node
 {
     uint32_t            magic;          // DMDEVFS_DRIVER_NODE_MAGIC
-    driver_order_t      order;
+    device_order_t      order;
     driver_t*           driver;         // reference to the driver
     const char*         config_path;    //!< Path to the configuration file
     const char*         section_name;   //!< Name of the section in the configuration file
+    void*               mutex;          //!< Mutex for locking the device node
 } device_node_t;
 
 #endif // DMDEVFS_TYPES_H

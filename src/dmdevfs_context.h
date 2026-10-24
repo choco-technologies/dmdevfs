@@ -38,4 +38,19 @@ extern bool context_add_node( dmfsi_context_t context, device_node_t* node );
  */
 extern bool context_remove_node( dmfsi_context_t context, device_node_t* node );
 
+/**
+ * @brief adds the driver to the list
+ */
+extern bool context_add_driver( dmfsi_context_t context, driver_t* driver );
+
+/**
+ * @brief removes a given drover
+ */
+extern bool context_remove_driver( dmfsi_context_t context, driver_t* driver );
+
+/**
+ * @brief finds a given driver
+ */
+extern driver_t* context_find_driver( dmfsi_context_t context, const char* driver_name );
+
 #endif // DMDEVFS_CONTEXT_H
