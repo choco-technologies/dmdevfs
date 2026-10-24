@@ -6,6 +6,16 @@
 #include "dmdrvi.h"
 
 /**
+ * @brief stores lifecycle of the node
+ */
+typedef enum 
+{
+    lifecycle_always_on,    //!< The device is always available
+    lifecycle_one_shot,     //!< The device is not needed anymore after configuration
+    lifecycle_default       = lifecycle_always_on,      //!< Default lifecycle of the node
+} lifecycle_t;
+
+/**
  * @brief magic for dmfsi_context
  */
 #define DMDEVFS_MAGIC       0x44455646      // DEVF
@@ -60,6 +70,7 @@ typedef struct device_node
     char*               section_name;   //!< Name of the section in the configuration file
     void*               mutex;          //!< Mutex for locking the device node
     char*               friends_group;  //!< Name of the friends group
+    lifecycle_t         lifecycle;      //!< Lifecycle of the node
 } device_node_t;
 
 #endif // DMDEVFS_TYPES_H

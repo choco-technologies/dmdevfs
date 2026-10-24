@@ -11,6 +11,17 @@ int equal_pointers(const void* data1, const void* data2)
 }
 
 /**
+ * @brief comparator for the nodes
+ */
+int compare_device_order(const void* data1, const void* data2)
+{
+    const device_node_t* node1 = data1;
+    const device_node_t* node2 = data2;
+
+    return node1->order - node2->order;
+}
+
+/**
  * @brief checks if the given driver name is as expected
  */
 int equal_driver_name( const void* data1, const void* data2 )
@@ -161,6 +172,20 @@ bool context_remove_node( dmfsi_context_t context, device_node_t* node )
     }
 
     return false;
+}
+
+/**
+ * @brief sorts the nodes by driver order
+ */
+bool context_sort_nodes( dmfsi_context_t context )
+{
+    bool success = false;
+    if(context_lock(context))
+    {
+        success = dmlist_sort(context->nodes, compare_device_order);
+        context_unlock(context);
+    }
+    return success;
 }
 
 

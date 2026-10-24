@@ -88,6 +88,28 @@ static device_order_t get_device_order( dmini_context_t ini_context, const char*
 }
 
 /**
+ * @brief returns lifecycle from the given configuration
+ */
+static lifecycle_t get_lifecycle( dmini_context_t ini_context, const char* section_name )
+{
+    const char* lifecycle_str = dmini_get_string(ini_context, section_name, "device_lifecycle", NULL);
+    if( lifecycle_str == NULL || strcmp(lifecycle_str, "default") == 0)
+    {
+        return lifecycle_default;
+    }
+    else if(strcmp(lifecycle_str, "one_shot") == 0)
+    {
+        return lifecycle_one_shot;
+    }
+    else if(strcmp(lifecycle_str, "always_on") == 0)
+    {
+        return lifecycle_always_on;
+    }
+    DMOD_LOG_ERROR("Unrecognized lifecycle: %s. Using default\n", lifecycle_str);
+    return lifecycle_default;
+}
+
+/**
  * @brief scans the given configuration directory
  */
 bool scan( dmfsi_context_t context, const char* path, const char* dir_name )
@@ -184,8 +206,8 @@ bool scan_section( dmfsi_context_t context, dmini_context_t ini_context, const c
         }
     }
     const char* friends_group = dmini_get_string(ini_context, section_name, "friends_group", NULL);
-
-    device_node_t* node = node_new(cfg_path, section_name, driver, get_device_order(ini_context, section_name), friends_group);
+    lifecycle_t lifecycle = get_lifecycle(ini_context, section_name);
+    device_node_t* node = node_new(cfg_path, section_name, driver, get_device_order(ini_context, section_name), friends_group, lifecycle);
     if(node == NULL)
     {
         DMOD_LOG_ERROR("Cannot create node %s for %s/%s\n", driver_name, cfg_path, section_name != NULL ? section_name : "<global>");

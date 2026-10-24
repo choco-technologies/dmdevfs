@@ -4,7 +4,7 @@
 /**
  * @brief creates the device node
  */
-device_node_t* node_new( const char* cfg_path, const char* section_name, driver_t* driver, device_order_t device_order, const char* friends_group )
+device_node_t* node_new( const char* cfg_path, const char* section_name, driver_t* driver, device_order_t device_order, const char* friends_group, lifecycle_t lifecycle )
 {
     device_node_t* node = Dmod_Malloc(sizeof(device_node_t));
     if(node == NULL)
@@ -20,6 +20,7 @@ device_node_t* node_new( const char* cfg_path, const char* section_name, driver_
     node->friends_group = friends_group == NULL ? NULL : Dmod_StrDup(friends_group);
     node->section_name = NULL;
     node->mutex = Dmod_Mutex_New(true);
+    node->lifecycle  = lifecycle;
     if(section_name != NULL)
     {
         node->section_name = Dmod_StrDup(section_name);
