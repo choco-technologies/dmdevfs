@@ -15,7 +15,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs,  dmfsi_context_t, _init, (const ch
 {
     dmfsi_context_t context = context_new();
 
-    scan(context, config);
+    scan(context, config, NULL);
 
     return context;
 }

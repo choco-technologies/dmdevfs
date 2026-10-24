@@ -28,4 +28,14 @@ extern bool context_lock( dmfsi_context_t context );
  */
 extern void context_unlock( dmfsi_context_t context );
 
+/**
+ * @brief adds the given device node to the list
+ */
+extern bool context_add_node( dmfsi_context_t context, device_node_t* node );
+
+/**
+ * @brief removes the given device node
+ */
+extern bool context_remove_node( dmfsi_context_t context, device_node_t* node );
+
 #endif // DMDEVFS_CONTEXT_H

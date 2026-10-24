@@ -22,6 +22,7 @@ struct dmfsi_context
     uint32_t            magic;          // DMDEVFS_MAGIC
     void*               mutex;
     dmlist_context_t*   drivers;        // driver_t
+    dmlist_context_t*   nodes;          // device_node_t
 };
 
 #define DMDEVFS_DRIVER_MAGIC        0x64727663      // drvc
@@ -31,7 +32,8 @@ struct dmfsi_context
  */
 typedef struct driver
 {
-    uint32_t            magic;          // DMDEVFS_DRIVER_MAGIC
+    uint32_t            magic;          //!< DMDEVFS_DRIVER_MAGIC
+    char*               name;           //!< Name of the driver
     Dmod_Context_t      context;
     void*               mutex;
 } driver_t;
@@ -44,10 +46,13 @@ typedef struct driver
 /**
  * @brief type for storing driver nodes
  */
-typedef struct driver_node
+typedef struct device_node
 {
     uint32_t            magic;          // DMDEVFS_DRIVER_NODE_MAGIC
     driver_order_t      order;
-} driver_node_t;
+    driver_t*           driver;         // reference to the driver
+    const char*         config_path;    //!< Path to the configuration file
+    const char*         section_name;   //!< Name of the section in the configuration file
+} device_node_t;
 
 #endif // DMDEVFS_TYPES_H

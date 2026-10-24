@@ -21,6 +21,14 @@ driver_t* driver_new( const char* module_name )
         return NULL;
     }
 
+    driver->name = Dmod_StrDup( module_name );
+    if(driver->name == NULL)
+    {
+        DMOD_LOG_ERROR("Cannot allocate memory for module name: '%s'\n", module_name);
+        driver_delete(driver);
+        return NULL;
+    }
+
     return driver;
 }
 
@@ -39,6 +47,10 @@ void driver_delete( driver_t* driver )
     if(driver->mutex != NULL)
     {
         Dmod_Mutex_Delete(driver->mutex);
+    }
+    if(driver->name != NULL)
+    {
+        Dmod_Free(driver->name);
     }
 
     Dmod_Free(driver);
