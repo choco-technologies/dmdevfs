@@ -343,41 +343,37 @@ The hierarchical structure is useful for organizing drivers by type or bus.
 
 Every mounted file system may bring driver configurations of its own, in
 `<mount point>/cfg/drivers` - the same layout as the directory the mount is
-configured from (`/cfg/drivers` on dmod-boot). `dmdevfs_add_config_dir(mount_point)`
-(`include/dmdevfs_cfg.h`) configures them in every dmdevfs mount, exactly as if
-they were in its own directory: ordered by `driver_order` and their
-dependencies, reported to libsystemd, their partitions exposed.
-`dmdevfs_remove_config_dir(mount_point)` removes them again - every node, its
-partitions and hot-plugged devices first, is reported removed (the services
-started for it stop) and the driver is freed (`dmdrvi_free()`, its module
-released) once the last handle open on any of its nodes is closed. The
-directory of the mount's own configuration is never configured twice.
+configured from (`/cfg/drivers` on dmod-boot). The root of a dmdevfs mount
+(`/dev` itself, not a node in it) opens a handle that answers two ioctls
+(`include/dmdevfs.h`), both with the mount point as argument:
 
-Both only queue the work for the hot-plug thread, which handles it in order
-with hot-plug events, and return at once.
+- `DMDEVFS_IOCTL_ADD_CONFIG_DIR` configures them in that dmdevfs mount, exactly
+  as if they were in its own directory: ordered by `driver_order` and their
+  dependencies, reported to libsystemd, their partitions exposed.
+- `DMDEVFS_IOCTL_REMOVE_CONFIG_DIR` removes them again - every node, its
+  partitions and hot-plugged devices first, is reported removed (the services
+  started for it stop) and the driver is freed (`dmdrvi_free()`, its module
+  released) once the last handle open on any of its nodes is closed.
 
-The [mountcfg](services/mountcfg/README.md) service follows the mounts: libsystemd
-reports them (dmfsi's `_mount_changed` dif, which dmvfs calls) as devices of class
-`mount`, a rule starts `mountcfg load` for a mount and `mountcfg unload` before
-an unmount, and both end when they are done. So a mounted card or `/ext` just
-brings its configuration:
+The directory of the mount's own configuration is never configured twice. Both
+only queue the work for the hot-plug thread, which handles it in order with
+hot-plug events, and return at once.
+
+The [devscan](services/devscan/README.md) service makes the calls: libsystemd
+reports the mounts (dmfsi's `_mount_changed` dif, which dmvfs calls) as devices
+of class `mount`, a rule starts `devscan add /dev <mount point>` for a mount and
+`devscan remove /dev <mount point>` before an unmount, and both end when they
+are done. So a mounted card or `/ext` just brings its drivers:
 
 ```
 <mount point>/cfg/drivers/    driver configurations   -> dmdevfs
-<mount point>/cfg/services/   units                   -> libsystemd
-<mount point>/cfg/rules/      device rules            -> libsystemd
 ```
 
-- **mounted** - `mountcfg load` calls `dmdevfs_add_config_dir()` (queued for the
-  hot-plug thread, which configures the drivers) and
-  `libsystemd_add_config_dir()` (units and rules, which start). A mount point
-  without `cfg/` is left alone.
-- **about to be unmounted** - `mountcfg unload` (libsystemd waits for it) stops
-  the units of that mount point (`libsystemd_remove_config_dir()`), so the file
-  system does not go away under them, and queues the removal of its drivers.
-
-In such a unit `%m` is the mount point (`exec=%m/bin/app.dmfc`), so it stays
-bound to its own card.
+- **mounted** - the drivers are configured by the hot-plug thread. A mount
+  point without `cfg/drivers` is left alone.
+- **about to be unmounted** - libsystemd waits for `devscan remove`, which
+  queues the removal of the drivers, so their nodes are reported gone (and
+  their services stopped) while the file system is still there.
 
 ### Example Configuration Files
 

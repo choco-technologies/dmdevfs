@@ -50,6 +50,34 @@ extern "C" {
 #define DMDEVFS_CLASS_AUDIO     "audio"
 #define DMDEVFS_CLASS_RTC       "rtc"
 
+/**
+ * @brief Commands of the mount itself: ioctl on its root
+ *
+ * Opening the root of a dmdevfs mount (`/dev` itself, not a node in it) gives a
+ * handle without a device behind it - reads report EOF, writes are discarded -
+ * that answers these commands. The command works on the mount that was opened,
+ * and only on it.
+ *
+ *  - DMDEVFS_IOCTL_ADD_CONFIG_DIR: every mounted file system may bring driver
+ *    configurations of its own, in `<mount point>/cfg/drivers` - the same
+ *    layout as the directory the dmdevfs mount is configured from. The argument
+ *    is the mount point (a NUL-terminated string, e.g. "/mnt/SD"); its drivers
+ *    are configured in this mount, exactly as if they were in its own directory.
+ *    The directory the mount is configured from is never loaded twice.
+ *  - DMDEVFS_IOCTL_REMOVE_CONFIG_DIR: removes them again - their nodes (with
+ *    their partitions and hot-plugged devices) are reported removed, so the
+ *    services started for them stop, and every driver is freed once the last
+ *    handle open on its nodes is closed.
+ *
+ * Both only queue the work for dmdevfs's hot-plug thread, which also handles
+ * hot-plug events, and return 0 at once (or a negative errno: -EINVAL for a
+ * missing or empty argument, -ENODEV when dmdevfs is not initialized, -ENOMEM).
+ * The devscan service (services/devscan) is what calls them, started by a
+ * libsystemd rule for every mount and unmount.
+ */
+#define DMDEVFS_IOCTL_ADD_CONFIG_DIR        0xF10
+#define DMDEVFS_IOCTL_REMOVE_CONFIG_DIR     0xF11
+
 #ifdef __cplusplus
 }
 #endif

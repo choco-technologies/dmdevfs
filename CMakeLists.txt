@@ -109,9 +109,9 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
 # dmdevmon - generic monitor service for nodes implementing the dmdrvi
 # monitor contract (reported to libsystemd as class "monitor", see above).
 add_subdirectory(services/dmdevmon)
-# mountcfg - loads the configuration directory (cfg/) of every mount point
-# into dmdevfs (dmdevfs_add_config_dir()) and libsystemd.
-add_subdirectory(services/mountcfg)
+# devscan - asks dmdevfs (ioctl DMDEVFS_IOCTL_ADD_CONFIG_DIR) to configure the
+# cfg/drivers of every mount point, started by a libsystemd rule on mount and unmount.
+add_subdirectory(services/devscan)
 
 # ======================================================================
 #               Tests

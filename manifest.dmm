@@ -8,6 +8,6 @@ dmdevfs https://github.com/choco-technologies/dmdfs/releases/download/v<version>
 # released together with dmdevfs
 dmdevmon https://github.com/choco-technologies/dmdfs/releases/download/v<version>/dmdevmon-v<version>-<arch_name>.zip
 
-# mountcfg - configuration directories of mount points (services/mountcfg),
+# devscan - driver configuration directories of mount points (services/devscan),
 # built and released together with dmdevfs
-mountcfg https://github.com/choco-technologies/dmdfs/releases/download/v<version>/mountcfg-v<version>-<arch_name>.zip
+devscan https://github.com/choco-technologies/dmdfs/releases/download/v<version>/devscan-v<version>-<arch_name>.zip

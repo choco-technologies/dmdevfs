@@ -174,7 +174,7 @@ dmod_link_modules(${DMOD_MODULE_NAME}
 )
 dmdevfs_register_test(${DMOD_MODULE_NAME})
 
-# test_config_dir - configuration directories of mount points (dmdevfs_add_config_dir())
+# test_config_dir - configuration directories of mount points (DMDEVFS_IOCTL_ADD_CONFIG_DIR)
 set(DMOD_MODULE_NAME        test_config_dir)
 dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     test_config_dir.c
