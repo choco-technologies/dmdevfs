@@ -9,7 +9,10 @@ set(DMOD_AUTHOR_NAME        "Patryk Kubiak")
 # Its own stack: it only opens a file and calls an ioctl, but the thread that mounts (automount's) is far too small
 # to do even that inline
 set(DMOD_STACK_SIZE         2048)
-set(DMOD_PRIORITY           0)
+# Above the services (0): a mount's `remove` unit is waited for by the unmount, and on a busy system (the car HMI) a
+# priority-0 process gets the CPU only in the gaps - it took the 20 s the unmount waits for it at most. It does
+# a few file operations and ends.
+set(DMOD_PRIORITY           3)
 set(DMOD_DMR_PATH           ${CMAKE_CURRENT_SOURCE_DIR}/devscan.dmr)
 
 dmod_add_executable(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
