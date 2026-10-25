@@ -16,6 +16,10 @@ and does an ioctl on it - `DMDEVFS_IOCTL_ADD_CONFIG_DIR` /
 [`include/dmdevfs.h`](../../include/dmdevfs.h) - then ends. dmdevfs queues the
 work for its hot-plug thread. A mount point without `cfg/drivers` is left alone.
 
+Only the drivers are dmdevfs's: the units and rules of a mount point
+(`cfg/services`, `cfg/rules`) are loaded by libsystemd itself when the file
+system is mounted.
+
 ## How it is started
 
 Nothing here follows mounts. libsystemd reports every mount as a device of class
