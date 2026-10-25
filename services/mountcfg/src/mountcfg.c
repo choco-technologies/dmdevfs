@@ -9,20 +9,20 @@
  *     <mount point>/cfg/services   units                  -> libsystemd
  *     <mount point>/cfg/rules      device rules           -> libsystemd
  *
- * mountcfg is told about every mount and unmount by dmvfs and hands the
- * directory to both. Neither dmdevfs nor libsystemd depends on dmvfs (they are
- * tested on the host loader, which has none) - mountcfg is the one module that
- * does.
+ * mountcfg implements dmvfs's _mount_changed DIF (dmvfs_dif.h) - dmvfs calls it
+ * for every mount and unmount - and hands the directory to both, in order: the
+ * drivers before the services that may use them, and the other way round.
  *
- * The work is done on mountcfg's own thread, not in the mount listener: the
- * listener runs in whatever thread mounts (automount's, with a small stack),
- * and loading a directory starts units - loads their modules from the card.
+ * The work is done on mountcfg's own thread, not in the DIF call: dmvfs calls
+ * it in whatever thread mounts (automount's, with a small stack), and loading
+ * a directory starts units - loads their modules from the card.
  */
 #define DMOD_ENABLE_REGISTRATION    ON
 #include "dmod.h"
 #include "dmosi.h"
 #include "dmlist.h"
-#include "dmvfs.h"
+#include "dmvfs.h"          // dmvfs_get_mount_point()
+#include "dmvfs_dif.h"      // _mount_changed
 #include "libsystemd.h"
 #include "dmdevfs_cfg.h"
 #include <errno.h>
@@ -46,6 +46,11 @@
 #define MOUNTCFG_UNMOUNT_WAIT_MS    30000
 
 /**
+ * @brief Longest mount point read with dmvfs_get_mount_point()
+ */
+#define MOUNTCFG_MAX_PATH           128
+
+/**
  * @brief One mount or unmount for the worker thread
  *
  * mount_point == NULL: the shutdown sentinel (see dmod_deinit()).
@@ -62,7 +67,7 @@ static dmosi_mutex_t      g_mutex     = NULL;
 static dmosi_semaphore_t  g_pending   = NULL;
 static dmosi_process_t    g_process   = NULL;
 static dmosi_thread_t     g_thread    = NULL;
-static bool               g_listening = false;
+static volatile bool      g_running   = false;   // The worker takes events (between dmod_init() and dmod_deinit())
 
 /**
  * @brief Load or unload the configuration directory of one mount point
@@ -108,6 +113,15 @@ static void handle(const char* mount_point, bool mounted)
 static void worker_thread(void* arg)
 {
     (void)arg;
+
+    // The mounts made before mountcfg started - on this stack, not on the one of
+    // whoever enabled the module. A mount also reported meanwhile is loaded once
+    // (a repeated report is a no-op).
+    char mount_point[MOUNTCFG_MAX_PATH];
+    for (int i = 0; dmvfs_get_mount_point(i, mount_point, sizeof(mount_point)) != -ENOENT; i++)
+    {
+        handle(mount_point, true);
+    }
 
     for (;;)
     {
@@ -161,15 +175,18 @@ static bool queue_event(mountcfg_event_t* event)
 }
 
 /**
- * @brief dmvfs mount listener
+ * @brief Hand a mount or an unmount to the worker
  *
- * A mount is handed to the worker and not waited for. An unmount waits until
- * the worker has stopped the units of the file system - they still need their
- * files - but not longer than MOUNTCFG_UNMOUNT_WAIT_MS.
+ * A mount is not waited for. An unmount waits until the worker has stopped the
+ * units of the file system - they still need their files - but not longer than
+ * MOUNTCFG_UNMOUNT_WAIT_MS.
  */
-static void mount_listener(const char* mount_point, bool mounted, void* user_data)
+static void report(const char* mount_point, bool mounted)
 {
-    (void)user_data;
+    if (!g_running)
+    {
+        return;
+    }
 
     mountcfg_event_t* event = Dmod_Malloc(sizeof(mountcfg_event_t));
     if (event == NULL)
@@ -207,10 +224,18 @@ static void mount_listener(const char* mount_point, bool mounted, void* user_dat
 }
 
 /**
- * @brief Module initialization: start the worker, follow the mounts
+ * @brief dmvfs's _mount_changed DIF: a file system was mounted or is about to be unmounted
+ */
+dmod_dmvfs_dif_api_declaration( 1.0, mountcfg, void, _mount_changed, (const char* mount_point, bool mounted) )
+{
+    report(mount_point, mounted);
+}
+
+/**
+ * @brief Module initialization: start the worker
  *
- * dmvfs reports the mounts there are at once, so whatever was mounted before
- * mountcfg started is loaded too.
+ * dmvfs reports the mounts made from now on (the DIF above); the worker loads
+ * the ones made before (dmvfs_get_mount_point()) first.
  */
 int dmod_init(const Dmod_Config_t* Config)
 {
@@ -236,28 +261,18 @@ int dmod_init(const Dmod_Config_t* Config)
         return -ENOMEM;
     }
 
-    int ret = dmvfs_add_mount_listener(mount_listener, NULL);
-    if (ret != 0 && ret != -EALREADY)
-    {
-        DMOD_LOG_ERROR("mountcfg: cannot follow the mounts (%d)\n", ret);
-        return ret;
-    }
-    g_listening = true;
+    g_running = true;
     return 0;
 }
 
 /**
- * @brief Module deinitialization: stop following the mounts, stop the worker
+ * @brief Module deinitialization: stop the worker
  *
  * What was loaded stays loaded - it goes when the system goes down.
  */
 int dmod_deinit(void)
 {
-    if (g_listening)
-    {
-        dmvfs_remove_mount_listener(mount_listener, NULL);
-        g_listening = false;
-    }
+    g_running = false;
 
     if (g_thread != NULL)
     {

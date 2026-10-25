@@ -10,8 +10,8 @@ layout of the firmware's `/cfg`:
 <mount point>/cfg/rules/      device rules            -> libsystemd
 ```
 
-mountcfg is told about every mount and unmount by dmvfs
-(`dmvfs_add_mount_listener()`) and hands the directory to dmdevfs
+mountcfg implements dmvfs's `_mount_changed` DIF (`dmvfs_dif.h`) - dmvfs
+calls it for every mount and unmount - and hands the directory to dmdevfs
 (`dmdevfs_add_config_dir()`, see `include/dmdevfs_cfg.h`) and libsystemd
 (`libsystemd_add_config_dir()`):
 
@@ -22,11 +22,12 @@ mountcfg is told about every mount and unmount by dmvfs
   there) and go away, then its drivers are removed.
 
 The work is done on mountcfg's own thread (4 kB of stack - starting a unit
-loads its module from the card), not in the mount listener, which runs in
+loads its module from the card), not in the DIF call, which dmvfs makes in
 whatever thread mounts: a mount is queued and not waited for, an unmount waits
 (up to 30 s) until the units of that file system have stopped.
 
-The mounts there are when mountcfg starts are loaded at once. The firmware's
+The mounts there are when mountcfg starts are loaded at once (read with
+`dmvfs_get_mount_point()`). The firmware's
 own `/cfg` - the configuration directory of the root file system - is loaded
 once, by dmdevfs's mount and libsystemd's scan, as before.
 
