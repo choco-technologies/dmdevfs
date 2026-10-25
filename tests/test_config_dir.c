@@ -41,6 +41,7 @@ typedef struct
     dmod_dmfsi_opendir_t    opendir;
     dmod_dmfsi_readdir_t    readdir;
     dmod_dmfsi_closedir_t   closedir;
+    dmod_dmfsi_mount_changed_t mount_changed;   // dmfsi's _mount_changed dif, which dmvfs calls
 } devfs_t;
 
 static devfs_t          g_fs;
@@ -63,7 +64,8 @@ static bool load_devfs(void)
     g_fs.opendir  = Dmod_GetDifFunction(m, dmod_dmfsi_opendir_sig);
     g_fs.readdir  = Dmod_GetDifFunction(m, dmod_dmfsi_readdir_sig);
     g_fs.closedir = Dmod_GetDifFunction(m, dmod_dmfsi_closedir_sig);
-    return g_fs.init && g_fs.deinit && g_fs.mounted && g_fs.fopen && g_fs.fclose && g_fs.ioctl &&
+    g_fs.mount_changed = Dmod_GetDifFunction(m, dmod_dmfsi_mount_changed_sig);
+    return g_fs.mount_changed && g_fs.init && g_fs.deinit && g_fs.mounted && g_fs.fopen && g_fs.fclose && g_fs.ioctl &&
            g_fs.opendir && g_fs.readdir && g_fs.closedir;
 }
 
@@ -224,4 +226,29 @@ DMOD_TEST_STEP(config_dir_driver_goes_with_its_hot_plugged_devices)
     g_fs.fclose(g_mount, child);
     DMOD_TEST_EXPECT_EQ(dmosi_semaphore_wait(gate.freed, 1, WAIT_MS), 0);
     dmosi_semaphore_destroy(gate.freed);
+}
+
+DMOD_TEST_STEP(config_dir_follows_the_mounts_reported_by_dmvfs)
+{
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+    DMOD_TEST_EXPECT_FALSE(node_exists(CARD_HOST));
+
+    // What dmvfs does: after a mount ... (the drivers come from the hot-plug thread)
+    g_fs.mount_changed(CARD_MOUNT, true);
+    DMOD_TEST_EXPECT_TRUE(wait_node(CARD_HOST, true));
+
+    // ... and before an unmount, which does not wait for that thread
+    g_fs.mount_changed(CARD_MOUNT, false);
+    DMOD_TEST_EXPECT_TRUE(wait_node(CARD_HOST, false));
+    DMOD_TEST_EXPECT_TRUE(node_exists(BASE_HOST));
+
+    // A mount point without cfg/ is left alone
+    int nodes = count_nodes();
+    g_fs.mount_changed(NONE_MOUNT, true);
+    g_fs.mount_changed(NONE_MOUNT, false);
+    g_fs.mount_changed(CARD_MOUNT, true);   // queued after the two above
+    DMOD_TEST_EXPECT_TRUE(wait_node(CARD_HOST, true));
+    DMOD_TEST_EXPECT_EQ(count_nodes(), nodes + 1);
+    g_fs.mount_changed(CARD_MOUNT, false);
+    DMOD_TEST_EXPECT_TRUE(wait_node(CARD_HOST, false));
 }

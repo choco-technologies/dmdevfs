@@ -132,6 +132,15 @@
 #define DMDEVFS_HOTPLUG_THREAD_NAME         "dmdevfs_hotplug"
 
 /**
+ * @brief The thread stopping the units of a mount point that is about to be unmounted (see the _mount_changed dif)
+ *
+ * Lives for the time of one unmount: a graceful stop polls and sleeps, a kill follows, and the unmount is called
+ * from threads (automount's) whose stack is far smaller.
+ */
+#define DMDEVFS_UNLOAD_THREAD_STACK_SIZE    (4096 + DMOSI_THREAD_STACK_OVERHEAD)
+#define DMDEVFS_UNLOAD_THREAD_NAME          "dmdevfs_umount"
+
+/**
  * @brief Type definition for path strings
  */
 typedef char path_t[MAX_PATH_LENGTH];
@@ -214,6 +223,8 @@ typedef struct
     char* config_dir;           // Not NULL (owned): load (config_add) or unload the configuration directory of this
                                  // mount point instead (see dmdevfs_add_config_dir())
     bool config_add;
+    bool config_systemd;        // A mount reported by the mounter (see _mount_changed): after the drivers, the units
+                                 // and rules of the directory go to libsystemd too
 } hotplug_event_t;
 
 /**
@@ -404,7 +415,7 @@ static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_mount_ready( dmfsi_context_t mount, uint64_t generation );
-static int queue_config_dir_event( const char* mount_point, bool add );
+static int queue_config_dir_event( const char* mount_point, bool add, bool systemd );
 static void process_config_dir( const char* mount_point, bool add );
 static void destroy_config_dirs( dmlist_context_t* config_dirs );
 
@@ -4117,6 +4128,16 @@ static void hotplug_worker_thread( void* arg )
         if (event->config_dir != NULL)
         {
             process_config_dir(event->config_dir, event->config_add);
+            if (event->config_systemd && event->config_add &&
+                Dmod_IsFunctionConnected((void*)libsystemd_add_config_dir))
+            {
+                // After the drivers: a unit may need a node they bring. -ENOENT: no cfg/ there.
+                int ret = libsystemd_add_config_dir(event->config_dir);
+                if (ret != 0 && ret != -ENOENT && ret != -EALREADY)
+                {
+                    DMOD_LOG_WARN("dmdevfs: cannot load the services of %s (%d)\n", event->config_dir, ret);
+                }
+            }
             Dmod_Free(event->config_dir);
             Dmod_Free(event);
             continue;
@@ -4573,7 +4594,7 @@ static void process_config_dir( const char* mount_point, bool add )
 /**
  * @brief Queue the loading/unloading of a mount point's configuration directory for the hot-plug worker
  */
-static int queue_config_dir_event( const char* mount_point, bool add )
+static int queue_config_dir_event( const char* mount_point, bool add, bool systemd )
 {
     if (mount_point == NULL)
     {
@@ -4592,6 +4613,7 @@ static int queue_config_dir_event( const char* mount_point, bool add )
     memset(event, 0, sizeof(*event));
     event->config_dir = Dmod_StrDup(mount_point);
     event->config_add = add;
+    event->config_systemd = systemd;
     if (event->config_dir == NULL)
     {
         Dmod_Free(event);
@@ -4617,7 +4639,7 @@ static int queue_config_dir_event( const char* mount_point, bool add )
  */
 dmod_dmdevfs_api_declaration( 1.0, int, _add_config_dir, (const char* mount_point) )
 {
-    return queue_config_dir_event(mount_point, true);
+    return queue_config_dir_event(mount_point, true, false);
 }
 
 /**
@@ -4625,5 +4647,62 @@ dmod_dmdevfs_api_declaration( 1.0, int, _add_config_dir, (const char* mount_poin
  */
 dmod_dmdevfs_api_declaration( 1.0, int, _remove_config_dir, (const char* mount_point) )
 {
-    return queue_config_dir_event(mount_point, false);
+    return queue_config_dir_event(mount_point, false, false);
+}
+
+/**
+ * @brief Thread body: stop and remove the units of one mount point (see _mount_changed)
+ */
+static void unload_units_thread( void* arg )
+{
+    libsystemd_remove_config_dir((const char*)arg);
+}
+
+/**
+ * @brief dmfsi's _mount_changed dif (called by dmvfs): load or unload the configuration directory of a mount point
+ *
+ * `<mount point>/cfg/drivers` goes to dmdevfs, `cfg/services` and `cfg/rules` to libsystemd - the layout of the
+ * firmware's own /cfg. dmdevfs does this itself because it already depends on libsystemd and has the thread that
+ * does the work: the call comes in the thread that mounts (automount's, with a small stack) and loading a directory
+ * starts units, which loads their modules.
+ *
+ * Mounted: queued for the hot-plug thread, not waited for - drivers first, then the units.
+ *
+ * About to be unmounted: the units of the mount point stop before this returns, because the file system must not
+ * go away under them. Neither in the calling thread - automount's has 2.5 kB of stack, which stopping units (a
+ * graceful stop, then a kill) overflows - nor through the hot-plug thread: when a card is pulled out that thread is
+ * itself busy waiting for automount to stop, which is what is unmounting, so waiting for it would be a deadlock.
+ * A thread of its own does it, for the time of one unmount, and the caller waits for it. The drivers are removed
+ * afterwards, by the hot-plug thread.
+ */
+dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, void, _mount_changed, (const char* mount_point, bool mounted) )
+{
+    if (mount_point == NULL)
+    {
+        return;
+    }
+
+    if (mounted)
+    {
+        queue_config_dir_event(mount_point, true, true);
+        return;
+    }
+
+    if (Dmod_IsFunctionConnected((void*)libsystemd_remove_config_dir))
+    {
+        dmosi_thread_t thread = (g_hotplug_process != NULL)
+            ? dmosi_thread_create(unload_units_thread, (void*)mount_point, DMDEVFS_HOTPLUG_THREAD_PRIORITY,
+                                  DMDEVFS_UNLOAD_THREAD_STACK_SIZE, DMDEVFS_UNLOAD_THREAD_NAME, g_hotplug_process)
+            : NULL;
+        if (thread != NULL)
+        {
+            dmosi_thread_join(thread);
+            dmosi_thread_destroy(thread);
+        }
+        else
+        {
+            libsystemd_remove_config_dir(mount_point);      // Out of memory: on the caller's own stack, then
+        }
+    }
+    queue_config_dir_event(mount_point, false, false);
 }

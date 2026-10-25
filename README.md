@@ -356,11 +356,32 @@ directory of the mount's own configuration is never configured twice.
 Both only queue the work for the hot-plug thread, which handles it in order
 with hot-plug events, and return at once.
 
-On dmod-boot the module that follows mounts - [mountcfg](services/mountcfg/README.md),
-started by its `type=library` unit, which implements dmfsi's `_mount_changed`
-dif - calls them for every mount and unmount,
-together with libsystemd's `libsystemd_add_config_dir()` for the units and
-rules of the same directory. dmdevfs itself does not depend on dmvfs.
+dmdevfs follows the mounts itself: it implements dmfsi's `_mount_changed` dif,
+which dmvfs calls after every mount and before every unmount (there is nothing
+to register, and no dependency on dmvfs). So a mounted card or `/ext` just
+brings its configuration:
+
+```
+<mount point>/cfg/drivers/    driver configurations   -> dmdevfs
+<mount point>/cfg/services/   units                   -> libsystemd
+<mount point>/cfg/rules/      device rules            -> libsystemd
+```
+
+- **mounted** - queued for the hot-plug thread, which configures the drivers
+  and then hands the units and rules to libsystemd
+  (`libsystemd_add_config_dir()`), which starts them. A mount point without
+  `cfg/` is left alone.
+- **about to be unmounted** - the units of that mount point stop before the
+  unmount goes on (`libsystemd_remove_config_dir()`), so the file system does
+  not go away under them; its drivers are removed afterwards by the hot-plug
+  thread. The stopping is done by a thread of its own, for the time of one
+  unmount, which the unmounting thread waits for: neither the unmounting thread
+  (automount's has 2.5 kB of stack) nor the hot-plug thread can do it - when a
+  card is pulled out the latter is busy waiting for automount to stop, which is
+  what unmounts.
+
+In such a unit `%m` is the mount point (`exec=%m/bin/app.dmfc`), so it stays
+bound to its own card.
 
 ### Example Configuration Files
 

@@ -16,8 +16,9 @@
 /**
  * Every mounted file system may bring driver configurations of its own, in
  * `<mount point>/cfg/drivers` - the same layout as the directory a dmdevfs
- * mount is configured from (`/cfg/drivers` on dmod-boot). The module that
- * follows mounts (mountcfg) calls these for every mount and unmount.
+ * mount is configured from (`/cfg/drivers` on dmod-boot). dmdevfs calls these
+ * itself for every mount and unmount (it implements dmfsi's _mount_changed
+ * dif); they are public for a mount point that is not mounted through dmvfs.
  *
  * dmdevfs_add_config_dir() configures them in every dmdevfs mount, exactly as
  * if they were in its own directory; dmdevfs_remove_config_dir() removes them
