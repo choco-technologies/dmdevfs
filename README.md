@@ -356,9 +356,10 @@ directory of the mount's own configuration is never configured twice.
 Both only queue the work for the hot-plug thread, which handles it in order
 with hot-plug events, and return at once.
 
-dmdevfs follows the mounts itself: it implements dmfsi's `_mount_changed` dif,
-which dmvfs calls after every mount and before every unmount (there is nothing
-to register, and no dependency on dmvfs). So a mounted card or `/ext` just
+The [mountcfg](services/mountcfg/README.md) service follows the mounts: libsystemd
+reports them (dmfsi's `_mount_changed` dif, which dmvfs calls) as devices of class
+`mount`, a rule starts `mountcfg load` for a mount and `mountcfg unload` before
+an unmount, and both end when they are done. So a mounted card or `/ext` just
 brings its configuration:
 
 ```
@@ -367,18 +368,13 @@ brings its configuration:
 <mount point>/cfg/rules/      device rules            -> libsystemd
 ```
 
-- **mounted** - queued for the hot-plug thread, which configures the drivers
-  and then hands the units and rules to libsystemd
-  (`libsystemd_add_config_dir()`), which starts them. A mount point without
-  `cfg/` is left alone.
-- **about to be unmounted** - the units of that mount point stop before the
-  unmount goes on (`libsystemd_remove_config_dir()`), so the file system does
-  not go away under them; its drivers are removed afterwards by the hot-plug
-  thread. The stopping is done by a thread of its own, for the time of one
-  unmount, which the unmounting thread waits for: neither the unmounting thread
-  (automount's has 2.5 kB of stack) nor the hot-plug thread can do it - when a
-  card is pulled out the latter is busy waiting for automount to stop, which is
-  what unmounts.
+- **mounted** - `mountcfg load` calls `dmdevfs_add_config_dir()` (queued for the
+  hot-plug thread, which configures the drivers) and
+  `libsystemd_add_config_dir()` (units and rules, which start). A mount point
+  without `cfg/` is left alone.
+- **about to be unmounted** - `mountcfg unload` (libsystemd waits for it) stops
+  the units of that mount point (`libsystemd_remove_config_dir()`), so the file
+  system does not go away under them, and queues the removal of its drivers.
 
 In such a unit `%m` is the mount point (`exec=%m/bin/app.dmfc`), so it stays
 bound to its own card.
