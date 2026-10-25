@@ -27,6 +27,18 @@
 #define DMDEVFS_CONTEXT_MAGIC 0x444D4456  // 'DMDV'
 #define ROOT_DIRECTORY_NAME "/"
 #define MAX_PATH_LENGTH     (DMOD_MAX_MODULE_NAME_LENGTH + 20)
+
+/**
+ * @brief Longest path of a configuration file - "/mnt/<label>/cfg/drivers/<module>/<file>.ini"
+ *        does not fit in MAX_PATH_LENGTH, which is the length of a node path
+ */
+#define CONFIG_PATH_LENGTH  128
+
+/**
+ * @brief Configuration directory of a mount point: "<mount point>/cfg/drivers"
+ *        (see DMDEVFS_IOCTL_ADD_CONFIG_DIR)
+ */
+#define DMDEVFS_CONFIG_DIR      "cfg/drivers"
 #define INI_MAIN_SECTION "main"
 
 /**
@@ -123,7 +135,7 @@
  */
 typedef char path_t[MAX_PATH_LENGTH];
 
-typedef struct
+typedef struct driver_node
 {
     dmdrvi_context_t driver_context;    // Driver-specific context
     Dmod_Context_t*  driver;            // Driver module context
@@ -159,6 +171,13 @@ typedef struct
                                          // open_count also reaches zero (see _fclose()), so a handle opened
                                          // before removal can keep reading/writing/closing it safely instead of
                                          // dereferencing memory dmdevfs already freed out from under it.
+    char* config_dir;                   // Owned copy of the mount point whose configuration directory configured this
+                                         // driver (see DMDEVFS_IOCTL_ADD_CONFIG_DIR); NULL for the mount's own configuration.
+    bool free_context_on_release;       // Set when its configuration directory is unloaded: dmdrvi_free() and release
+                                         // the module once the last reference is gone (see release_driver_node_ref()),
+                                         // not while a handle - on it or on a node sharing its context - is still open.
+    struct driver_node* context_owner;  // A partition or hot-plugged node removed with its owner's configuration
+                                         // directory: the owner, which it holds a reference on until it is freed.
 } driver_node_t;
 
 typedef struct
@@ -191,6 +210,9 @@ typedef struct
     bool available;   // true: device became available, false: no longer available
     uint64_t mount_generation; // Reject queued notifications for a reused mount address.
     dmfsi_context_t mounted;    // Not NULL: report the nodes of this mount instead (see dmfsi_dmdevfs_mounted())
+    char* config_dir;           // Not NULL (owned): load (config_add) or unload the configuration directory of this
+                                 // mount point instead, in the mount `mounted` (see DMDEVFS_IOCTL_ADD_CONFIG_DIR)
+    bool config_add;
 } hotplug_event_t;
 
 /**
@@ -267,6 +289,10 @@ struct dmfsi_context
     dmosi_semaphore_t workers_idle;
     bool ready;                 // True once dmfsi_dmdevfs_mounted() has been called by the mounter
     path_t mount_path;          // This mount's own absolute path, valid once `ready` is true
+    dmlist_context_t* config_dirs; // Mount points (owned char*) whose configuration directory is loaded into this
+                                    // mount; only used on the hot-plug worker thread (see process_config_dir())
+    driver_node_t* control;     // What the mount's root ("/", i.e. "/dev" itself) opens: a built-in node without
+                                 // a driver that answers the DMDEVFS_IOCTL_* commands. Never in `drivers`.
 };
 
 /**
@@ -329,6 +355,8 @@ static bool configure_required_dependencies(dmfsi_context_t ctx, dmlist_context_
 static driver_node_t* configure_driver(const char* driver_name, dmini_context_t config_ctx, const char* section_name);
 static int unconfigure_drivers(dmfsi_context_t ctx);
 static driver_node_t* create_builtin_null_device(void);
+static driver_node_t* create_builtin_control_node(void);
+static driver_node_t* ref_control_node( dmfsi_context_t ctx );
 static driver_node_t* create_builtin_devkey_device(const char* secret, size_t size);
 static bool is_file(const char* path);
 static bool is_driver( const char* name);
@@ -379,6 +407,10 @@ static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_
 static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_dev_num_t* dev_num );
 static void process_mount_ready( dmfsi_context_t mount, uint64_t generation );
+static int queue_config_dir_event( dmfsi_context_t mount, const char* mount_point, bool add );
+static void process_config_dir( dmfsi_context_t mount, uint64_t generation, const char* mount_point, bool add );
+static int control_ioctl( dmfsi_context_t ctx, int request, void* arg );
+static void destroy_config_dirs( dmlist_context_t* config_dirs );
 
 // ============================================================================
 //                      Module Interface Implementation
@@ -445,6 +477,7 @@ int dmod_deinit(void)
         {
             stop_event->context = NULL;
             stop_event->mounted = NULL;
+            stop_event->config_dir = NULL;
 
             dmosi_mutex_lock(g_hotplug_mutex);
             dmlist_push_back(g_hotplug_events, stop_event);
@@ -569,19 +602,24 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
         ctx->config_path[path_length] = '\0';
     }
     ctx->drivers = dmlist_create();
+    ctx->config_dirs = dmlist_create();
     ctx->worker_refs = 0;
     ctx->stopping = false;
     ctx->workers_idle = dmosi_semaphore_create(0, 1);
-    if (ctx->config_path == NULL || ctx->drivers == NULL || ctx->workers_idle == NULL)
+    if (ctx->config_path == NULL || ctx->drivers == NULL || ctx->config_dirs == NULL || ctx->workers_idle == NULL)
     {
         if (ctx->workers_idle != NULL) dmosi_semaphore_destroy(ctx->workers_idle);
         if (ctx->drivers != NULL) dmlist_destroy(ctx->drivers);
+        if (ctx->config_dirs != NULL) dmlist_destroy(ctx->config_dirs);
         Dmod_Free(ctx->config_path);
         Dmod_Free(ctx);
         return NULL;
     }
     ctx->ready = false;
     ctx->mount_path[0] = '\0';
+
+    // The mount's root, see dmfsi_context::control - NULL (and the root not openable) when out of memory
+    ctx->control = create_builtin_control_node();
 
     // Always present, regardless of configuration - see DMDEVFS_NULL_DEVICE_NAME.
     driver_node_t* null_device = create_builtin_null_device();
@@ -621,8 +659,10 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, dmfsi_context_t, _init, (const cha
         DMOD_LOG_ERROR("Failed to configure drivers\n");
         detach_mount_and_wait(ctx);
         unconfigure_drivers(ctx);
+        free_driver_node(ctx->control);
         dmosi_semaphore_destroy(ctx->workers_idle);
         dmlist_destroy(ctx->drivers);
+        destroy_config_dirs(ctx->config_dirs);
         Dmod_Free(ctx->config_path);
         Dmod_Free(ctx);
         return NULL;
@@ -652,8 +692,10 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _deinit, (dmfsi_context_t ctx
 
     detach_mount_and_wait(ctx);
     unconfigure_drivers(ctx);
+    free_driver_node(ctx->control);
     dmosi_semaphore_destroy(ctx->workers_idle);
     dmlist_destroy(ctx->drivers);
+    destroy_config_dirs(ctx->config_dirs);
     Dmod_Free(ctx->config_path);
     Dmod_Free(ctx);
     return DMFSI_OK;
@@ -699,7 +741,8 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _fopen, (dmfsi_context_t ctx,
     // Find the driver node for this file, taking a reference on it so it
     // cannot be freed out from under this handle by a concurrent
     // process_device_unavailable() - see find_and_ref_driver_node().
-    driver_node_t* driver_node = find_and_ref_driver_node(ctx, path);
+    driver_node_t* driver_node = strcmp(path, ROOT_DIRECTORY_NAME) == 0 ? ref_control_node(ctx)
+                                                                         : find_and_ref_driver_node(ctx, path);
     if(driver_node == NULL)
     {
         DMOD_LOG_ERROR("File not found: %s\n", path);
@@ -983,6 +1026,12 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx,
     }
 
     file_handle_t* handle = (file_handle_t*)fp;
+
+    // The mount's root: the DMDEVFS_IOCTL_* commands
+    if(handle->driver == ctx->control)
+    {
+        return control_ioctl(ctx, request, arg);
+    }
 
     // Device file system commands are answered here, never by the driver
     if(request == DMDRVI_IOCTL_DEVFS_GET_FRIEND)
@@ -1558,7 +1607,7 @@ static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* c
     {
         if (!strcmp(entry, ".") || !strcmp(entry, "..")) continue;
         // Construct full path for the entry
-        char full_path[MAX_PATH_LENGTH];
+        char full_path[CONFIG_PATH_LENGTH];
         size_t config_path_len = strlen(config_path);
         size_t entry_len = strlen(entry);
 
@@ -1566,7 +1615,7 @@ static int collect_driver_configs(dmlist_context_t* pending, dmlist_context_t* c
         bool needs_separator = (config_path_len > 0 && config_path[config_path_len - 1] != '/');
         size_t required_len = config_path_len + (needs_separator ? 1 : 0) + entry_len + 1;
 
-        if (required_len > MAX_PATH_LENGTH)
+        if (required_len > CONFIG_PATH_LENGTH)
         {
             DMOD_LOG_ERROR("Path too long: %s/%s\n", config_path, entry);
             continue;
@@ -1696,6 +1745,9 @@ static driver_node_t* configure_driver(const char* driver_name, dmini_context_t 
     driver_node->reported = 0;
     driver_node->open_count = 0;
     driver_node->removed = false;
+    driver_node->config_dir = NULL;
+    driver_node->free_context_on_release = false;
+    driver_node->context_owner = NULL;
     driver_node->driver = driver;
     driver_node->driver_context = dmdrvi_create(config_ctx, &driver_node->dev_num);
     if (driver_node->driver_context == NULL)
@@ -2046,7 +2098,12 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
         return false;
     }
 
-    if (!dmlist_push_back(ctx->drivers, driver_node))
+    // Under the lock: a configuration directory is loaded while the mount is in
+    // use (fopen() looks nodes up, the hot-plug worker adds and removes them).
+    dmosi_mutex_lock(g_devfs_mutex);
+    bool added = dmlist_push_back(ctx->drivers, driver_node);
+    dmosi_mutex_unlock(g_devfs_mutex);
+    if (!added)
     {
         DMOD_LOG_ERROR("Failed to add driver to list: %s\n", entry->module_name);
         free_driver_node(driver_node);
@@ -2195,6 +2252,61 @@ static driver_node_t* create_builtin_null_device(void)
     node->is_builtin = true;
     Dmod_SnPrintf(node->path, sizeof(node->path), "/%s", DMDEVFS_NULL_DEVICE_NAME);
     return node;
+}
+
+/**
+ * @brief Create the node the root of a mount opens (see dmfsi_context::control)
+ *
+ * Like the null device it has no driver module (is_builtin): reads report EOF,
+ * writes are discarded, and the only thing it does is answer the DMDEVFS_IOCTL_*
+ * commands (control_ioctl()).
+ */
+static driver_node_t* create_builtin_control_node(void)
+{
+    driver_node_t* node = Dmod_Malloc(sizeof(driver_node_t));
+    if (node == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for the control node\n");
+        return NULL;
+    }
+
+    memset(node, 0, sizeof(*node));
+    node->is_builtin = true;
+    Dmod_SnPrintf(node->path, sizeof(node->path), "%s", ROOT_DIRECTORY_NAME);
+    return node;
+}
+
+/**
+ * @brief Take a reference on the control node of a mount, as find_and_ref_driver_node() does on a driver node
+ *
+ * @return The node, or NULL when it could not be created at mount time
+ */
+static driver_node_t* ref_control_node( dmfsi_context_t ctx )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    driver_node_t* node = ctx->control;
+    if (node != NULL)
+    {
+        node->open_count++;
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+    return node;
+}
+
+/**
+ * @brief Carry out a DMDEVFS_IOCTL_* command on a mount
+ */
+static int control_ioctl( dmfsi_context_t ctx, int request, void* arg )
+{
+    switch (request)
+    {
+        case DMDEVFS_IOCTL_ADD_CONFIG_DIR:
+            return queue_config_dir_event(ctx, (const char*)arg, true);
+        case DMDEVFS_IOCTL_REMOVE_CONFIG_DIR:
+            return queue_config_dir_event(ctx, (const char*)arg, false);
+        default:
+            return DMFSI_ERR_NOT_FOUND;
+    }
 }
 
 /**
@@ -2789,11 +2901,25 @@ static void release_driver_node_ref( driver_node_t* node )
     dmosi_mutex_lock(g_devfs_mutex);
     node->open_count--;
     bool free_now = node->removed && node->open_count == 0;
+    bool free_context = free_now && node->free_context_on_release;
+    driver_node_t* owner = free_now ? node->context_owner : NULL;
     dmosi_mutex_unlock(g_devfs_mutex);
 
     if (free_now)
     {
+        // The last reference to a driver removed with its configuration directory
+        // (see remove_config_dir_drivers()): every node sharing its context is gone.
+        if (free_context)
+        {
+            dmod_dmdrvi_free_t dmdrvi_free = Dmod_GetDifFunction(node->driver, dmod_dmdrvi_free_sig);
+            if (dmdrvi_free != NULL)
+            {
+                dmdrvi_free(node->driver_context);
+            }
+            cleanup_driver_module(Dmod_GetName(node->driver), node->was_loaded, node->was_enabled);
+        }
         free_driver_node(node);
+        release_driver_node_ref(owner);
     }
 }
 
@@ -2962,6 +3088,7 @@ static bool queue_hotplug_event( dmdrvi_context_t context, const dmdrvi_dev_num_
     event->dev_num = *dev_num;
     event->available = available;
     event->mounted = NULL;
+    event->config_dir = NULL;
 
     dmosi_mutex_lock(g_hotplug_mutex);
     bool queued = dmlist_push_back(g_hotplug_events, event);
@@ -3908,6 +4035,10 @@ static void free_driver_node( driver_node_t* node )
     {
         Dmod_Free(node->parent_path);
     }
+    if (node->config_dir != NULL)
+    {
+        Dmod_Free(node->config_dir);
+    }
     if (node->is_devkey)
     {
         volatile uint8_t* secret = node->secret;
@@ -4054,6 +4185,13 @@ static void hotplug_worker_thread( void* arg )
         {
             continue;
         }
+        if (event->config_dir != NULL)
+        {
+            process_config_dir(event->mounted, event->mount_generation, event->config_dir, event->config_add);
+            Dmod_Free(event->config_dir);
+            Dmod_Free(event);
+            continue;
+        }
         if (event->mounted != NULL)
         {
             process_mount_ready(event->mounted, event->mount_generation);
@@ -4114,8 +4252,16 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
         return;
     }
 
-    retain_worker_mount_locked(mount);
     driver_node_t* owner = (driver_node_t*)dmlist_find(mount->drivers, (void*)context, compare_driver_context);
+    if (owner == NULL || owner->is_dynamic || owner->is_partition)
+    {
+        // Only its hot-plugged nodes are left: the driver is being removed with
+        // its configuration directory (see remove_config_dir_drivers()).
+        dmosi_mutex_unlock(g_devfs_mutex);
+        DMOD_LOG_ERROR("dmdrvi_device_available: the driver is being removed\n");
+        return;
+    }
+    retain_worker_mount_locked(mount);
     dmdrvi_context_t owner_context = owner->driver_context;
     Dmod_Context_t* owner_driver = owner->driver;
     uint8_t owner_report_mask = owner->report_mask;
@@ -4164,6 +4310,9 @@ static void process_device_available( dmdrvi_context_t context, const dmdrvi_dev
     new_node->reported = 0;
     new_node->open_count = 0;
     new_node->removed = false;
+    new_node->config_dir = NULL;
+    new_node->free_context_on_release = false;
+    new_node->context_owner = NULL;
 
     if (read_driver_node_path(new_node, new_node->path, sizeof(new_node->path)) != 0)
     {
@@ -4268,4 +4417,259 @@ static void process_device_unavailable( dmdrvi_context_t context, const dmdrvi_d
     release_driver_node_ref(node);
     DMOD_LOG_INFO("Hot-plugged device no longer available: %s\n", removed_path);
     release_worker_mount(mount);
+}
+
+// ============================================================================
+//              Configuration directories of mount points
+// ============================================================================
+
+/**
+ * @brief dmlist_find() comparator matching a `char*` entry by its text
+ */
+static int compare_string( const void* data, const void* user_data )
+{
+    return strcmp((const char*)data, (const char*)user_data);
+}
+
+/**
+ * @brief Free every entry of a mount's config_dirs and the list itself
+ */
+static void destroy_config_dirs( dmlist_context_t* config_dirs )
+{
+    if (config_dirs == NULL)
+    {
+        return;
+    }
+
+    char* mount_point = (char*)dmlist_pop_front(config_dirs);
+    while (mount_point != NULL)
+    {
+        Dmod_Free(mount_point);
+        mount_point = (char*)dmlist_pop_front(config_dirs);
+    }
+    dmlist_destroy(config_dirs);
+}
+
+/**
+ * @brief Configure the drivers of "<mount_point>/cfg/drivers" in one dmdevfs mount
+ *
+ * Runs on the hot-plug worker thread, with a worker reference on @p mount. The
+ * configuration is the same as the mount's own (configure_drivers()); every
+ * driver configured from it remembers @p mount_point, which is what
+ * remove_config_dir_drivers() removes. Nothing to do when the directory is not
+ * there, is the mount's own, or is loaded already.
+ */
+static void add_config_dir_drivers( dmfsi_context_t mount, const char* mount_point )
+{
+    char config_dir[CONFIG_PATH_LENGTH];
+    size_t len = strlen(mount_point);
+    bool needs_separator = len > 0 && mount_point[len - 1] != '/';
+    Dmod_SnPrintf(config_dir, sizeof(config_dir), "%s%s%s", mount_point, needs_separator ? "/" : "", DMDEVFS_CONFIG_DIR);
+
+    if (compare_paths_ignore_trailing_slash(config_dir, mount->config_path) == 0 ||
+        dmlist_find(mount->config_dirs, mount_point, compare_string) != NULL)
+    {
+        return;
+    }
+
+    void* dir = Dmod_OpenDir(config_dir);
+    if (dir == NULL)
+    {
+        return;
+    }
+    Dmod_CloseDir(dir);
+
+    char* entry = Dmod_StrDup(mount_point);
+    if (entry == NULL || !dmlist_push_back(mount->config_dirs, entry))
+    {
+        Dmod_Free(entry);
+        DMOD_LOG_ERROR("dmdevfs: out of memory - the drivers of %s are not configured\n", config_dir);
+        return;
+    }
+
+    DMOD_LOG_INFO("dmdevfs: configuring the drivers of %s\n", config_dir);
+
+    dmosi_mutex_lock(g_devfs_mutex);
+    size_t first = dmlist_size(mount->drivers);
+    dmosi_mutex_unlock(g_devfs_mutex);
+
+    configure_drivers(mount, NULL, config_dir);
+
+    // The drivers it appended - the partitions and devices they brought share
+    // their context and go with them.
+    dmosi_mutex_lock(g_devfs_mutex);
+    size_t count = dmlist_size(mount->drivers);
+    for (size_t i = first; i < count; i++)
+    {
+        driver_node_t* node = (driver_node_t*)dmlist_get(mount->drivers, i);
+        if (!node->is_dynamic && !node->is_partition && !node->is_builtin && node->config_dir == NULL)
+        {
+            node->config_dir = Dmod_StrDup(mount_point);
+        }
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+}
+
+/**
+ * @brief Find the node of @p mount that remove_config_dir_drivers() takes out next, and take it out
+ *
+ * Searched backwards, so what was added last goes first. Unpublished under the
+ * lock - no fopen() finds it anymore - and kept alive by a reference of the caller.
+ *
+ * @param owner NULL: the last driver configured from @p mount_point's directory;
+ *              otherwise: the last partition or hot-plugged node sharing @p owner's
+ *              context, which then holds a reference on @p owner until it is freed.
+ */
+static driver_node_t* take_config_dir_node( dmfsi_context_t mount, const char* mount_point, driver_node_t* owner )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    driver_node_t* found = NULL;
+    for (size_t i = dmlist_size(mount->drivers); i-- > 0 && found == NULL; )
+    {
+        driver_node_t* node = (driver_node_t*)dmlist_get(mount->drivers, i);
+        bool match = (owner == NULL)
+            ? (!node->is_dynamic && !node->is_partition && !node->is_builtin &&
+               node->config_dir != NULL && strcmp(node->config_dir, mount_point) == 0)
+            : ((node->is_dynamic || node->is_partition) && node->driver_context == owner->driver_context);
+        found = match ? node : NULL;
+    }
+    if (found != NULL)
+    {
+        dmlist_remove(mount->drivers, found, compare_driver);
+        found->removed = true;
+        found->open_count++;
+        if (owner != NULL)
+        {
+            found->context_owner = owner;
+            owner->open_count++;
+        }
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+    return found;
+}
+
+/**
+ * @brief Remove the drivers configured from "<mount_point>/cfg/drivers" from one dmdevfs mount
+ *
+ * Runs on the hot-plug worker thread, with a worker reference on @p mount. For
+ * every such driver, the last configured first: its partitions and hot-plugged
+ * devices, then its own node, each reported removed (the services started for
+ * it stop) like a device that went away (see process_device_unavailable()).
+ * dmdrvi_free() and the release of the module wait for the last reference to
+ * any of these nodes (see release_driver_node_ref()).
+ */
+static void remove_config_dir_drivers( dmfsi_context_t mount, const char* mount_point )
+{
+    char* entry = (char*)dmlist_find(mount->config_dirs, mount_point, compare_string);
+    if (entry == NULL)
+    {
+        return;
+    }
+
+    DMOD_LOG_INFO("dmdevfs: removing the drivers of %s\n", mount_point);
+
+    driver_node_t* owner;
+    while ((owner = take_config_dir_node(mount, mount_point, NULL)) != NULL)
+    {
+        driver_node_t* node;
+        while ((node = take_config_dir_node(mount, mount_point, owner)) != NULL)
+        {
+            if (node->is_dynamic)
+            {
+                notify_friends_about_node(mount, node, dmdrvi_dev_state_dead);
+            }
+            report_node_removed(node);
+            DMOD_LOG_INFO("Device no longer available: %s\n", node->path);
+            release_driver_node_ref(node);
+        }
+
+        notify_friends_about_node(mount, owner, dmdrvi_dev_state_dead);
+        report_node_removed(owner);
+        DMOD_LOG_INFO("Driver of %s removed: %s\n", mount_point, owner->path);
+
+        dmosi_mutex_lock(g_devfs_mutex);
+        owner->free_context_on_release = true;
+        dmosi_mutex_unlock(g_devfs_mutex);
+        release_driver_node_ref(owner);
+    }
+
+    dmlist_remove(mount->config_dirs, entry, compare_string);
+    Dmod_Free(entry);
+}
+
+/**
+ * @brief Load or unload the configuration directory of a mount point in one dmdevfs mount
+ *
+ * The queued half of DMDEVFS_IOCTL_ADD_CONFIG_DIR/_REMOVE_CONFIG_DIR, on the hot-plug worker thread.
+ */
+static void process_config_dir( dmfsi_context_t mount, uint64_t generation, const char* mount_point, bool add )
+{
+    dmosi_mutex_lock(g_devfs_mutex);
+    bool live = dmlist_find(g_dmdevfs_mounts, mount, compare_mount_context) != NULL;
+    // A stale queued pointer may equal the address of a later mount.
+    live = live && mount->generation == generation;
+    if (live)
+    {
+        // Driver code runs without g_devfs_mutex below.
+        retain_worker_mount_locked(mount);
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+    if (!live)
+    {
+        return;
+    }
+
+    if (add)
+    {
+        add_config_dir_drivers(mount, mount_point);
+    }
+    else
+    {
+        remove_config_dir_drivers(mount, mount_point);
+    }
+    release_worker_mount(mount);
+}
+
+/**
+ * @brief Queue the loading/unloading of a mount point's configuration directory for the hot-plug worker
+ */
+static int queue_config_dir_event( dmfsi_context_t mount, const char* mount_point, bool add )
+{
+    if (mount_point == NULL || mount_point[0] == '\0')
+    {
+        return -EINVAL;
+    }
+    if (g_hotplug_events == NULL)
+    {
+        return -ENODEV;
+    }
+
+    hotplug_event_t* event = Dmod_Malloc(sizeof(hotplug_event_t));
+    if (event == NULL)
+    {
+        return -ENOMEM;
+    }
+    memset(event, 0, sizeof(*event));
+    event->mounted = mount;
+    event->mount_generation = mount->generation;
+    event->config_dir = Dmod_StrDup(mount_point);
+    event->config_add = add;
+    if (event->config_dir == NULL)
+    {
+        Dmod_Free(event);
+        return -ENOMEM;
+    }
+
+    dmosi_mutex_lock(g_hotplug_mutex);
+    bool queued = dmlist_push_back(g_hotplug_events, event);
+    dmosi_mutex_unlock(g_hotplug_mutex);
+    if (!queued)
+    {
+        Dmod_Free(event->config_dir);
+        Dmod_Free(event);
+        return -ENOMEM;
+    }
+
+    dmosi_semaphore_post(g_hotplug_semaphore, 1);
+    return 0;
 }

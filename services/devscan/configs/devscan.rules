@@ -1,0 +1,12 @@
+; devscan.rules - libsystemd device rule.
+;
+; libsystemd reports every mount as a device of class "mount" (dmfsi's _mount_changed dif, called by dmvfs), named
+; after the mount point ("/mnt/SD" -> "mnt_SD", "/ext" -> "ext"), with the mount point as its value (%v).
+;
+; Mounted: let dmdevfs configure its cfg/drivers. About to be unmounted: let it drop them, while the file system is
+; still there - the unmount waits for the unit.
+;
+; Load with libsystemd_load_rules() on the directory this file lives in.
+[class=mount]
+start=devscan@%name
+remove=devscan-remove@%name
