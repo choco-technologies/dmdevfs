@@ -9,11 +9,11 @@
  *     <mount point>/cfg/services   units                  -> libsystemd
  *     <mount point>/cfg/rules      device rules           -> libsystemd
  *
- * mountcfg implements dmvfs's _mount_changed DIF (dmvfs_dif.h) - dmvfs calls it
+ * mountcfg implements dmfsi's _mount_changed dif - dmvfs calls it
  * for every mount and unmount - and hands the directory to both, in order: the
  * drivers before the services that may use them, and the other way round.
  *
- * The work is done on mountcfg's own thread, not in the DIF call: dmvfs calls
+ * The work is done on mountcfg's own thread, not in the dif call: dmvfs calls
  * it in whatever thread mounts (automount's, with a small stack), and loading
  * a directory starts units - loads their modules from the card.
  */
@@ -22,7 +22,7 @@
 #include "dmosi.h"
 #include "dmlist.h"
 #include "dmvfs.h"          // dmvfs_get_mount_point()
-#include "dmvfs_dif.h"      // _mount_changed
+#include "dmfsi.h"          // the _mount_changed dif
 #include "libsystemd.h"
 #include "dmdevfs_cfg.h"
 #include <errno.h>
@@ -224,9 +224,9 @@ static void report(const char* mount_point, bool mounted)
 }
 
 /**
- * @brief dmvfs's _mount_changed DIF: a file system was mounted or is about to be unmounted
+ * @brief dmfsi's _mount_changed dif (called by dmvfs): a file system was mounted or is about to be unmounted
  */
-dmod_dmvfs_dif_api_declaration( 1.0, mountcfg, void, _mount_changed, (const char* mount_point, bool mounted) )
+dmod_dmfsi_dif_api_declaration( 1.0, mountcfg, void, _mount_changed, (const char* mount_point, bool mounted) )
 {
     report(mount_point, mounted);
 }
@@ -234,7 +234,7 @@ dmod_dmvfs_dif_api_declaration( 1.0, mountcfg, void, _mount_changed, (const char
 /**
  * @brief Module initialization: start the worker
  *
- * dmvfs reports the mounts made from now on (the DIF above); the worker loads
+ * dmvfs reports the mounts made from now on (the dif above); the worker loads
  * the ones made before (dmvfs_get_mount_point()) first.
  */
 int dmod_init(const Dmod_Config_t* Config)

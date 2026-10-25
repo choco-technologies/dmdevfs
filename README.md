@@ -357,7 +357,8 @@ Both only queue the work for the hot-plug thread, which handles it in order
 with hot-plug events, and return at once.
 
 On dmod-boot the module that follows mounts - [mountcfg](services/mountcfg/README.md),
-started by its `type=library` unit - calls them for every mount and unmount,
+started by its `type=library` unit, which implements dmfsi's `_mount_changed`
+dif - calls them for every mount and unmount,
 together with libsystemd's `libsystemd_add_config_dir()` for the units and
 rules of the same directory. dmdevfs itself does not depend on dmvfs.
 

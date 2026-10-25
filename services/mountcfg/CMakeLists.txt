@@ -1,7 +1,7 @@
 # =====================================================================
 #       mountcfg - configuration directories of mount points
 # =====================================================================
-# Follows mounts (dmvfs's _mount_changed DIF) and loads the configuration
+# Follows mounts (dmfsi's _mount_changed dif, called by dmvfs) and loads the configuration
 # directory (cfg/) of every mount point into dmdevfs (cfg/drivers) and
 # libsystemd (cfg/services, cfg/rules) - see README.md. A Library module,
 # started by its type=library unit (configs/mountcfg.ini).
@@ -22,7 +22,7 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_BINARY_DIR}
 )
 
-# dmvfs: dmvfs_get_mount_point() and dmvfs_dif.h - dmvfs is built into the firmware, only
+# dmvfs: dmvfs_get_mount_point() - dmvfs is built into the firmware, only
 # its header is needed (dmvfs.h includes dmfsi.h, hence dmfsi). It makes
 # mountcfg a module of the target only: the host loader has no dmvfs.
 dmod_link_modules(${DMOD_MODULE_NAME}
