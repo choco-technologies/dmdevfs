@@ -363,10 +363,12 @@ The [devscan](services/devscan/README.md) service makes the calls: libsystemd
 reports the mounts (dmfsi's `_mount_changed` dif, which dmvfs calls) as devices
 of class `mount`, a rule starts `devscan add /dev <mount point>` for a mount and
 `devscan remove /dev <mount point>` before an unmount, and both end when they
-are done. So a mounted card or `/ext` just brings its drivers:
+are done. So a mounted card or `/ext` just brings its configuration:
 
 ```
-<mount point>/cfg/drivers/    driver configurations   -> dmdevfs
+<mount point>/cfg/drivers/    driver configurations   -> dmdevfs (devscan)
+<mount point>/cfg/services/   units                   -> libsystemd (by itself, on the mount)
+<mount point>/cfg/rules/      device rules            -> libsystemd (by itself, on the mount)
 ```
 
 - **mounted** - the drivers are configured by the hot-plug thread. A mount
