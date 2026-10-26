@@ -399,6 +399,7 @@ static void scan_partitions( dmfsi_context_t mount, const char* mount_path, driv
 static void remove_partitions_of( dmfsi_context_t mount, const dynamic_device_lookup_t* lookup );
 static bool notify_all_drivers_path_ready( void* data, void* user_data );
 static void notify_friends_about_node( dmfsi_context_t mount, driver_node_t* node, dmdrvi_dev_state_t state );
+static void notify_node_about_friends( dmfsi_context_t mount, driver_node_t* node );
 static bool notify_friend_recipient( void* data, void* user_data );
 static bool notify_all_friends_ready( void* data, void* user_data );
 static void free_driver_node( driver_node_t* node );
@@ -2128,6 +2129,7 @@ static bool configure_pending_entry(dmfsi_context_t ctx, dmlist_context_t* pendi
     {
         notify_driver_path_ready(mount_path, driver_node);
         notify_friends_about_node(ctx, driver_node, dmdrvi_dev_state_ready);
+        notify_node_about_friends(ctx, driver_node);
         report_node_ready(mount_path, driver_node);
         scan_partitions(ctx, mount_path, driver_node);
     }
@@ -3933,6 +3935,7 @@ typedef struct
 {
     driver_node_t* source;
     const dmdrvi_friend_info_t* info;
+    driver_node_t* only;    // Deliver to this node only (NULL: to every member of the group)
 } friend_notification_t;
 
 /**
@@ -3943,6 +3946,11 @@ static bool notify_friend_recipient( void* data, void* user_data )
     driver_node_t* recipient = (driver_node_t*)data;
     const friend_notification_t* notification = (const friend_notification_t*)user_data;
     driver_node_t* source = notification->source;
+
+    if (notification->only != NULL && recipient != notification->only)
+    {
+        return true;
+    }
 
     if (recipient == NULL || recipient->is_builtin || recipient->is_dynamic || recipient->is_partition ||
         recipient->driver_context == source->driver_context ||
@@ -3972,7 +3980,8 @@ static bool notify_friend_recipient( void* data, void* user_data )
  * Must be called without g_devfs_mutex held because friend_changed is driver
  * code and may call back into the filesystem.
  */
-static void notify_friends_about_node( dmfsi_context_t mount, driver_node_t* node, dmdrvi_dev_state_t state )
+static void notify_friends_about_node_to( dmfsi_context_t mount, driver_node_t* node, dmdrvi_dev_state_t state,
+                                          driver_node_t* only )
 {
     if (mount == NULL || node == NULL || node->is_builtin || node->friends_group == NULL)
     {
@@ -4000,8 +4009,48 @@ static void notify_friends_about_node( dmfsi_context_t mount, driver_node_t* nod
     friend_notification_t notification = {
         .source = node,
         .info = &info,
+        .only = only,
     };
     dmlist_foreach(mount->drivers, notify_friend_recipient, &notification);
+}
+
+static void notify_friends_about_node( dmfsi_context_t mount, driver_node_t* node, dmdrvi_dev_state_t state )
+{
+    notify_friends_about_node_to(mount, node, state, NULL);
+}
+
+typedef struct
+{
+    dmfsi_context_t mount;
+    driver_node_t* recipient;
+} friends_of_node_t;
+
+/**
+ * @brief dmlist_foreach() callback telling one node about one member of its friends group
+ */
+static bool notify_node_about_member( void* data, void* user_data )
+{
+    const friends_of_node_t* of = (const friends_of_node_t*)user_data;
+    notify_friends_about_node_to(of->mount, (driver_node_t*)data, dmdrvi_dev_state_ready, of->recipient);
+    return true;
+}
+
+/**
+ * @brief Tell a node that was configured into an already-mounted instance about the members of its group
+ *
+ * notify_friends_about_node() tells the existing members about a new one, but at the initial mount every driver
+ * learns about the others in notify_all_friends_ready(). A driver configured later (a mount point's cfg/drivers,
+ * see devscan) would never hear of the members configured before it - the I2C bus a codec needs, for example - so
+ * it gets the same notifications here.
+ */
+static void notify_node_about_friends( dmfsi_context_t mount, driver_node_t* node )
+{
+    if (mount == NULL || node == NULL || node->friends_group == NULL)
+    {
+        return;
+    }
+    friends_of_node_t of = { .mount = mount, .recipient = node };
+    dmlist_foreach(mount->drivers, notify_node_about_member, &of);
 }
 
 /**
