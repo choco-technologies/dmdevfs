@@ -77,7 +77,7 @@ jobs:
           cd build_$ARCH_DIR_NAME
           
           # First run cmake to fetch dependencies with version from tag
-          cmake .. -DDMOD_TOOLS_NAME=arch/${{ matrix.arch_name }} -DDMOD_MODULE_VERSION="${{ steps.get_version.outputs.version }}"
+          cmake .. -DDMOD_TOOLS_NAME=arch/${{ matrix.arch_name }} -DDMOD_MODULE_VERSION="${{ steps.get_version.outputs.version }}" -DDMOD_COMPRESSION_METHOD=deflate
           
           # Build the modules
           cmake --build .
