@@ -213,7 +213,8 @@ panel of its display - get the same information with
 `DMDRVI_IOCTL_DEVFS_GET_FRIEND` on an open node: DMDEVFS answers it itself
 (the driver never sees it) with the `index`-th other member of the node's
 group, its absolute path and its `friend_role`, and `-ENOENT` when there is
-none.
+none. `DMDRVI_IOCTL_DEVFS_GET_GROUP` answers the name of the node's group (`""` when it has none),
+so two nodes can be told to belong together - a display and its inputs - by comparing names.
 
 ### libsystemd Device Reporting
 
