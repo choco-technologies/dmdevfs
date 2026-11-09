@@ -395,6 +395,7 @@ static void report_node_removed( driver_node_t* node );
 static bool map_node_offset( const driver_node_t* node, dmfsi_offset_t offset, size_t* size, dmdrvi_offset_t* device_offset );
 static int write_to_driver( file_handle_t* handle, const void* buffer, size_t size, dmdrvi_ssize_t* bytes_written );
 static int partition_ioctl( file_handle_t* handle, dmod_dmdrvi_ioctl_t dmdrvi_ioctl, int request, void* arg );
+static int get_group( driver_node_t* node, dmdrvi_devfs_group_t* arg );
 static void scan_partitions( dmfsi_context_t mount, const char* mount_path, driver_node_t* node );
 static void remove_partitions_of( dmfsi_context_t mount, const dynamic_device_lookup_t* lookup );
 static bool notify_all_drivers_path_ready( void* data, void* user_data );
@@ -1038,6 +1039,10 @@ dmod_dmfsi_dif_api_declaration( 1.0, dmdevfs, int, _ioctl, (dmfsi_context_t ctx,
     if(request == DMDRVI_IOCTL_DEVFS_GET_FRIEND)
     {
         return get_friend(ctx, handle->driver, (dmdrvi_devfs_friend_t*)arg);
+    }
+    if(request == DMDRVI_IOCTL_DEVFS_GET_GROUP)
+    {
+        return get_group(handle->driver, (dmdrvi_devfs_group_t*)arg);
     }
 
     if(handle->driver->is_builtin)
@@ -3597,6 +3602,38 @@ static int get_friend( dmfsi_context_t mount, driver_node_t* node, dmdrvi_devfs_
             (void)copy_out(arg->role, arg->role_size, role, arg->role_length);
         }
         ret = fits ? 0 : -ERANGE;
+    }
+    dmosi_mutex_unlock(g_devfs_mutex);
+    return ret;
+}
+
+/**
+ * @brief Answer DMDRVI_IOCTL_DEVFS_GET_GROUP for @p node - never passed to its driver
+ *
+ * The name of the node's friends_group, "" when it has none.
+ *
+ * @return 0, -ERANGE when the name does not fit (nothing is copied), -EINVAL for a NULL arg
+ */
+static int get_group( driver_node_t* node, dmdrvi_devfs_group_t* arg )
+{
+    if (arg == NULL)
+    {
+        return -EINVAL;
+    }
+    arg->name[0] = '\0';
+    int ret = 0;
+    dmosi_mutex_lock(g_devfs_mutex);
+    if (node->friends_group != NULL)
+    {
+        size_t length = strlen(node->friends_group);
+        if (length < sizeof(arg->name))
+        {
+            memcpy(arg->name, node->friends_group, length + 1U);
+        }
+        else
+        {
+            ret = -ERANGE;
+        }
     }
     dmosi_mutex_unlock(g_devfs_mutex);
     return ret;

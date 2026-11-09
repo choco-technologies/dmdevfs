@@ -340,6 +340,36 @@ DMOD_TEST_STEP(dmdevfs_finds_friends_of_a_node)
     DMOD_TEST_EXPECT_EQ(get_friend("/dmdevfs_mockdrv0", &f), -ENOENT);   /* no group */
 }
 
+/** DMDRVI_IOCTL_DEVFS_GET_GROUP on @p node through dmdevfs. */
+static int get_group_name(const char* node, dmdrvi_devfs_group_t* g)
+{
+    void* file = NULL;
+    if (g_fs.fopen(g_mount, &file, node, DMFSI_O_RDONLY, 0) != DMFSI_OK)
+    {
+        return -ENODEV;
+    }
+    int ret = g_fs.ioctl(g_mount, file, DMDRVI_IOCTL_DEVFS_GET_GROUP, g);
+    g_fs.fclose(g_mount, file);
+    return ret;
+}
+
+DMOD_TEST_STEP(dmdevfs_tells_the_group_of_a_node)
+{
+    dmdrvi_devfs_group_t g;
+
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+
+    memset(&g, 'x', sizeof(g));
+    DMOD_TEST_EXPECT_EQ(get_group_name("/dmdevfs_mockdrv3", &g), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(g.name, "panel"), 0);
+    memset(&g, 'x', sizeof(g));
+    DMOD_TEST_EXPECT_EQ(get_group_name("/dmdevfs_mockdrv4", &g), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(g.name, "panel"), 0);                  /* the members of a group have its name */
+    memset(&g, 'x', sizeof(g));
+    DMOD_TEST_EXPECT_EQ(get_group_name("/dmdevfs_mockdrv0", &g), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(g.name, ""), 0);                       /* no group: an empty name */
+}
+
 DMOD_TEST_STEP(dmdevfs_reports_hot_plugged_block_node_and_its_removal)
 {
     DMOD_TEST_EXPECT_NOT_NULL(g_mount);
