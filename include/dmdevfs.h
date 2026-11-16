@@ -32,7 +32,9 @@ extern "C" {
  *  - "audio":   DMDRVI_IOCTL_AUDIO_GET_INFO - an audio codec or other audio
  *    device, e.g. for a player or mixer service;
  *  - "rtc": DMDRVI_IOCTL_RTC_GET_INFO - an RTC, including unset calendars,
- *    e.g. for the dmutc library service.
+ *    e.g. for the dmutc library service;
+ *  - "lora": DMDRVI_IOCTL_LORA_GET_INFO - a LoRa radio, e.g. for the libmeshcore
+ *    library service.
  *
  * The device name is the node path relative to the mount with '/' replaced
  * by '_' (unit names cannot contain '/'): "/dmsdio0/0" -> "dmsdio0_0". The
@@ -49,6 +51,7 @@ extern "C" {
 #define DMDEVFS_CLASS_INPUT     "input"
 #define DMDEVFS_CLASS_AUDIO     "audio"
 #define DMDEVFS_CLASS_RTC       "rtc"
+#define DMDEVFS_CLASS_LORA      "lora"
 
 /**
  * @brief Commands of the mount itself: ioctl on its root
