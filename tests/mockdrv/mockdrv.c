@@ -42,6 +42,7 @@ struct dmdrvi_context
     bool        input;
     bool        audio;
     bool        rtc;
+    bool        lora;
     bool        plugged;
     dmdrvi_monitor_policy_t     policy;
     volatile uint32_t           events;     /* MONITOR_EVENT calls */
@@ -224,6 +225,7 @@ dmod_dmdrvi_dif_api_declaration(2.0, dmdevfs_mockdrv, dmdrvi_context_t, _create,
     ctx->input   = (strcmp(dmini_get_string(config, NULL, "input", "false"), "true") == 0);
     ctx->audio   = (strcmp(dmini_get_string(config, NULL, "audio", "false"), "true") == 0);
     ctx->rtc = (strcmp(dmini_get_string(config, NULL, "rtc", "false"), "true") == 0);
+    ctx->lora = (strcmp(dmini_get_string(config, NULL, "lora", "false"), "true") == 0);
     ctx->plugged = false;
     ctx->events = 0;
     ctx->refreshes = 0;
@@ -394,6 +396,10 @@ static int host_ioctl(dmdrvi_context_t context, int command, void* arg)
             ((dmdrvi_input_info_t*)arg)->type = DMDRVI_INPUT_TYPE_TOUCHSCREEN;
             ((dmdrvi_input_info_t*)arg)->width = 480;
             ((dmdrvi_input_info_t*)arg)->height = 272;
+            return 0;
+        case DMDRVI_IOCTL_LORA_GET_INFO:
+            if (!context->lora || arg == NULL) return -ENOTTY;
+            memset(arg, 0, sizeof(dmdrvi_lora_info_t));
             return 0;
         case DMDRVI_IOCTL_RTC_GET_INFO:
             if (!context->rtc || arg == NULL) return -ENOTTY;

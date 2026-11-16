@@ -93,6 +93,7 @@ void dmod_test_setup(void)
         wait_ready("inp@dmdevfs_mockdrv4", "/dev/dmdevfs_mockdrv4");
         wait_ready("aud@dmdevfs_mockdrv6", "/dev/dmdevfs_mockdrv6");
         wait_ready("rtc@dmdevfs_mockdrv8", "/dev/dmdevfs_mockdrv8");
+        wait_ready("lora@dmdevfs_mockdrv10", "/dev/dmdevfs_mockdrv10");
     }
 }
 
@@ -232,6 +233,16 @@ DMOD_TEST_STEP(dmdevfs_reports_unset_rtc_and_stops_its_service)
     DMOD_TEST_EXPECT_EQ(unit_state("rtc@dmdevfs_mockdrv2"), -1); /* not an RTC */
     g_fs.deinit(g_mount); g_mount = NULL;
     DMOD_TEST_EXPECT_TRUE(wait_state("rtc@dmdevfs_mockdrv8", DMOSI_PROCESS_STATE_TERMINATED));
+}
+
+DMOD_TEST_STEP(dmdevfs_reports_a_lora_radio_and_stops_its_service)
+{
+    DMOD_TEST_EXPECT_NOT_NULL(g_mount);
+    DMOD_TEST_EXPECT_TRUE(wait_ready("lora@dmdevfs_mockdrv10", "/dev/dmdevfs_mockdrv10"));
+    DMOD_TEST_EXPECT_EQ(unit_state("lora@dmdevfs_mockdrv11"), -1); /* filtered by report=audio */
+    DMOD_TEST_EXPECT_EQ(unit_state("lora@dmdevfs_mockdrv2"), -1);  /* not a radio */
+    g_fs.deinit(g_mount); g_mount = NULL;
+    DMOD_TEST_EXPECT_TRUE(wait_state("lora@dmdevfs_mockdrv10", DMOSI_PROCESS_STATE_TERMINATED));
 }
 
 /** DMDRVI_IOCTL_DEVFS_GET_FRIEND on @p node through dmdevfs. */
